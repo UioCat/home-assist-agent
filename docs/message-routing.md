@@ -5,7 +5,7 @@
 核心结论：
 
 - 原渠道响应是默认策略，不是绝对规则。
-- 入站消息必须保存可恢复的 `RouteRef`，输出时才能准确回到微信、钉钉、飞书、语音或本地屏幕。
+- 入站消息必须保存可恢复的 `RouteRef`，输出时才能准确回到本地 PWA、本地 API、微信、钉钉、飞书、语音或本地屏幕。
 - `Notification Policy` 负责决定能不能原路返回；`Outbound Dispatcher` 负责渲染、发送、重试、降级和审计。
 - 群聊、语音、触摸屏、Camera、IoT、Scheduler 等来源的“返回目标”语义不同，不能只用 `channel` 一个字段表达。
 
@@ -344,22 +344,23 @@ Adapter 需要返回平台消息 ID、错误码、是否可重试、限流信息
 
 每个事件都应包含 `trace_id`、`home_id`、`person_id`、`channel`、`target_ref`、`sensitivity`、`risk_level`、`reason_codes`。
 
-## 10. MVP 实现范围
+## 10. 第一期实现范围
 
-第一阶段建议实现：
+第一期建议实现：
 
 - `RouteRef`、`ReplyTarget`、`MessageEnvelope`、`DeliveryAttempt` 表。
-- HTTP/mock、微信 mock、飞书 mock、钉钉 mock、voice mock、screen mock adapter。
-- `source_route_affinity` 策略：低敏低风险默认原路回复。
-- 群聊敏感内容私聊转发。
-- 高风险确认私聊 eligible approvers。
-- 投递重试、fallback、静默和审计。
+- local PWA、local API、scheduler/local timer、HTTP/mock、voice mock、camera mock、screen mock adapter。
+- `source_route_affinity` 策略：低敏低风险默认回到本地 PWA 或原入口。
+- 本地 owner 私有输出、公共屏低敏摘要、静默记录和审计。
+- 高风险确认投递到本地确认页，第一期不依赖跨平台按钮。
+- 投递重试、静默和本地 fallback；跨平台 fallback 后置。
 
 E2E 样例：
 
+- 本地 PWA“把客厅灯调暗”后在 PWA 展示执行结果和 trace。
+- local API 创建晚上 10 点提醒后，本地 PWA 显示提醒。
 - 微信单聊“把客厅灯调暗”后微信单聊回复。
 - 飞书群聊问 Camera 结果，群聊只回摘要，详情私聊。
 - 家庭语音请求开门，手机确认，不在语音中批准。
 - 原渠道发送失败，fallback 到用户已验证私聊渠道。
 - 平台重复 webhook 不重复回复。
-

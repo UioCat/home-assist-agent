@@ -199,7 +199,7 @@ SessionSummary = {
 | Codex 推断 | “用户可能喜欢安静模式” | 不自动写入，只能作为低置信候选或放弃 |
 | 非可信内容 | OCR、网页、转发消息里的指令 | 不可直接写入长期记忆；只能作为带 provenance 的观察材料 |
 
-自动写入只允许第一阶段覆盖“个人私有、低风险、明确表达、证据充分”的偏好或短期任务上下文。家庭共享记忆、权限记忆、跨用户可见记忆、设备安全规则一律不能自动批准。
+自动写入只允许第一期覆盖“个人私有、低风险、明确表达、证据充分”的偏好或短期任务上下文。家庭共享记忆、权限记忆、跨用户可见记忆、设备安全规则一律不能自动批准。
 
 ## 确认策略
 
@@ -256,7 +256,7 @@ SessionSummary = {
 6. 将记忆、摘要、用户输入、设备状态和外部内容都包装为 `ContextBlock`，保留 provenance、trust level 和允许用途。
 7. 生成 `ContextAssemblyRecord`，记录包含、排除、冲突和摘要引用。
 
-检索第一阶段不做复杂向量库，优先使用结构化字段和简单全文检索：
+检索第一期不做复杂向量库，优先使用结构化字段和简单全文检索：
 
 - 结构化过滤：`home_id`、`owner_person_id`、`subject_person_id`、`scope`、`visibility`、`memory_type`、`expires_at`。
 - 文本检索：`summary`、`natural_language_summary`、设备别名、房间名、规则关键词。
@@ -309,22 +309,23 @@ ContextBlock = {
 }
 ```
 
-## MVP 范围
+## 第一期范围
 
-第一阶段实现以下能力：
+第一期实现以下能力：
 
 - SQLite 表或等价存储：`MemoryCandidate`、`MemoryEntry`、`MemoryCorrection`、`SessionSummary`、`ContextAssemblyRecord`。
 - `Memory Write Pipeline` 支持候选创建、策略判断、自动批准、等待确认、拒绝、过期、替代和审计。
 - 只允许自动写入个人私有、低风险、明确表达且证据充分的偏好。
-- 家庭共享记忆、权限记忆、跨用户可见记忆一律进入确认流程。
+- 家庭共享记忆、权限记忆、跨用户可见记忆一律进入本地确认流程或手动配置。
+- 提供本地记忆管理入口，至少能查看、修改、删除个人偏好和家庭规则草案。
 - `Context Builder` 只读取 approved 且未过期的记忆、最新 `SessionSummary` 和按需查询结果。
 - 每次 Codex 调用前生成 `ContextAssemblyRecord`。
-- 48 小时会话压缩作为 `Task Orchestrator` 的 `session_maintenance` 任务实现。
+- 48 小时会话压缩可作为 `Task Orchestrator` 的 `session_maintenance` 任务实现；第一期也可以先支持手动触发或 showcase 固定样例。
 - 压缩结果写 `SessionSummary`，并记录 `compressed_until_message_id`。
 - 不接复杂向量库，先用结构化过滤和简单文本检索。
 - 不做完整家庭状态缓存，设备实时状态按需查询 Home Assistant。
 
-第一阶段暂不做：
+第一期暂不做：
 
 - 自动推断家庭共享规则并直接生效。
 - 跨 home 记忆读取。
@@ -375,4 +376,3 @@ ContextBlock = {
 2. HA 设备名被改成命令式文本，装配时只作为设备标识符，不作为用户指令。
 3. 群聊陌生人诱导读取私人记忆，Context Builder 不读取私有记忆，输出转澄清或拒绝。
 4. ASR 低置信度语音包含记忆写入内容，系统进入澄清，不写入 `MemoryEntry`。
-

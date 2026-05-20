@@ -1,6 +1,6 @@
 # 任务与确认设计
 
-本文聚焦 `Task Orchestrator`、`TaskRun`、`ActionPlan` 和 `Confirmation Broker` 的第一阶段设计。目标是把不能在一次响应内安全完成的事情，统一建模为可持久化、可恢复、可取消、可过期、可审计的任务；其中确认也是任务的一种。
+本文聚焦 `Task Orchestrator`、`TaskRun`、`ActionPlan` 和 `Confirmation Broker` 的第一期设计。目标是把提醒、确认、简单事件和需要跨时间处理的事情，统一建模为可持久化、可恢复、可取消、可过期、可审计的任务；其中确认也是任务的一种。
 
 ## 设计边界
 
@@ -258,20 +258,20 @@ stateDiagram-v2
 
 ## 触发方式
 
-任务触发来源统一写入 `Task.trigger`，第一阶段支持以下类型：
+任务触发来源统一写入 `Task.trigger`，第一期支持以下类型：
 
 | 触发方式 | 场景 | 处理方式 |
 | --- | --- | --- |
 | `time_at` | 晚上 10 点提醒关窗 | `next_run_at` 到期后 worker 执行 |
 | `manual` | 用户确认、管理员手动重试 | Broker 或 API 唤醒任务 |
 | `lazy_before_interaction` | 48 小时未交互后的会话压缩 | 下一次用户消息进入 Codex 前触发 |
-| `event_match` | mock/HTTP 事件触发洗衣机完成 | MVP 只支持简单事件匹配 |
+| `event_match` | mock/HTTP/local API 事件触发洗衣机完成 | 第一期只支持简单事件匹配 |
 
 暂缓但预留：
 
 - `interval`：固定间隔任务。
 - `cron`：周期表达式任务。
-- 复杂 HA 事件订阅：第一阶段只从 mock/HTTP 事件进入。
+- 复杂 HA 事件订阅：第一期只从 local API、mock/HTTP 或 showcase fixture 事件进入。
 
 ## 执行记录与 Worker Lease
 
@@ -287,7 +287,7 @@ stateDiagram-v2
 Lease 规则：
 
 - `locked_until` 到期后，其他 worker 可以抢占，原 worker 写回结果必须带 `locked_by` 条件，避免迟到写覆盖新 attempt。
-- 每个 handler 应定期续租长任务；MVP 中尽量让单次 handler 短小。
+- 每个 handler 应定期续租长任务；第一期尽量让单次 handler 短小。
 - worker 崩溃后，未完成 `TaskRun` 保留为 `running`，恢复扫描时创建下一次 attempt，并在审计中标记上次可能中断。
 - 有副作用动作必须使用 `ActionPlan.idempotency_key` 或 `ToolInvocation.operation_id` 去重，不能靠 lease 保证一次性。
 
@@ -339,24 +339,24 @@ Lease 规则：
 | 风险升级 | 低风险灯光变成批量场景 | 重新走确认 |
 | 确认过期 | 用户点了旧按钮 | 返回过期提示，不执行 |
 
-## MVP 范围
+## 第一期范围
 
-第一阶段实现：
+第一期实现：
 
 - SQLite 表保存 `Task`、`TaskRun`、`ConfirmationRequest`、`ToolInvocation` 和 `AuditEvent`。
 - 单进程 worker 轮询任务表，使用 `locked_until`、`locked_by` 做 lease。
-- 支持一次性任务、确认任务、48 小时 session maintenance。
-- 支持确认创建、私聊/原路 mock 投递、批准、拒绝、撤销、过期。
+- 支持一次性提醒、简单事件提醒、确认任务、可选 48 小时 session maintenance。
+- 支持确认创建、本地 PWA 投递、批准、拒绝、撤销、过期。
 - 支持 `ActionPlan` 哈希、确认任务绑定、确认后重新进入 `Tool Safety Proxy`。
-- 高风险动作只生成确认请求，不在 MVP 中直接执行高风险设备控制。
+- 高风险动作可以生成确认或 dry-run，但第一期不真实执行高风险设备写控制。
 - 所有任务状态、确认决策、worker attempt、工具代理结果写审计。
 
 建议先实现的 handler：
 
 - `reminder`：到时间后调用 `Notification Policy` 发送提醒。
-- `confirmation`：等待 Broker 决策；通过后唤醒原动作执行流程。
-- `session_maintenance`：用户 48 小时未交互后压缩会话摘要。
-- `automation_proposal`：保存草案，确认后创建可审计的自动化记录或 mock 输出。
+- `confirmation`：等待 Broker 决策；通过后唤醒原动作执行流程，并重新进入 `Tool Safety Proxy`。如果目标仍是第一期禁止的高风险真实写操作，最终状态为 `blocked`、`dry_run` 或 `not_supported_in_phase_1`。
+- `session_maintenance`：用户 48 小时未交互后压缩会话摘要，可在第一期作为可选后台任务或 showcase 样例。
+- `automation_proposal`：保存草案，确认后创建可审计的自动化记录或 demo 输出。
 
 ## 测试场景
 
@@ -370,7 +370,7 @@ Lease 规则：
 确认流程：
 
 - 高风险门锁动作生成 `ConfirmationRequest` 和 `task_type=confirmation` 的任务，不直接调用 HA。
-- 用户批准后，任务被唤醒，并重新进入 `Tool Safety Proxy`。
+- 用户批准后，任务被唤醒，并重新进入 `Tool Safety Proxy`；第一期高风险真实写操作仍不会执行。
 - 用户拒绝后，确认进入 `rejected`，任务进入失败或取消，不执行动作。
 - 请求方撤销后，旧确认按钮不可再批准。
 - 确认过期后点击批准，返回过期，不执行动作。
@@ -392,10 +392,10 @@ Lease 规则：
 
 ## 不做事项
 
-第一阶段不做：
+第一期不做：
 
 - 不做复杂 cron UI 和完整自动化编排界面。
-- 不做完整 HA 事件订阅系统，只支持 mock/HTTP 事件触发。
+- 不做完整 HA 事件订阅系统，只支持 local API、mock/HTTP 或 showcase fixture 事件触发。
 - 不做独立 `Capability Registry` 或完整 `Home State` 快照。
 - 不做高风险设备确认后的真实直控；先验证确认、复核和审计闭环。
 - 不让 Codex 直接创建、更新或删除任务表和确认表。

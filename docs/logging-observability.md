@@ -8,7 +8,7 @@
 - Langfuse 中 `trace`、`observation`、`session` 的 LLM 应用可观测模型。
 - Phoenix / OpenInference 对 Agent、LLM、工具调用链路的观测思路。
 
-本项目不把这些系统作为强依赖；MVP 先在本地数据库和结构化日志中落地兼容字段，后续可导出到 OpenTelemetry Collector、Langfuse、Phoenix 或其他平台。
+本项目不把这些系统作为强依赖；第一期先在本地数据库和结构化日志中落地兼容字段，后续可导出到 OpenTelemetry Collector、Langfuse、Phoenix 或其他平台。
 
 ## 1. 核心原则
 
@@ -312,7 +312,7 @@ LogViewDecision = {
 
 ## 10. 告警规则
 
-第一阶段建议内置这些告警：
+第一期建议内置这些告警：
 
 - `critical`：审计写入失败且有副作用动作等待执行。
 - `critical`：高风险动作没有确认却进入 HA 写调用。
@@ -346,17 +346,18 @@ ReplayBundle = {
 
 ReplayBundle 不一定包含 raw 敏感内容；默认提供摘要和引用，raw 查看另走 `LogViewPolicy`。
 
-## 12. MVP 实现范围
+## 12. 第一期实现范围
 
-第一阶段实现：
+第一期实现：
 
 - `request_traces`、`audit_events`、`audit_subjects`、`trace_spans`、`runtime_diagnostics`、`metrics_rollups`。
 - 一个统一的 `AuditRecorder`，对高风险/副作用动作同步写审计。
 - 一个统一的 `TraceRecorder`，上下文管理器形式包住每个模块调用。
 - JSON 结构化日志，携带 `trace_id`、`span_id`、`home_id`、`person_id`、`module`。
 - 基础查询：按 trace、person、module、operation、task、confirmation、error。
-- 隐私脱敏策略和日志查看权限。
+- 隐私脱敏策略；日志查看权限第一期按本地 owner 处理，长期再做多人 ACL。
 - 本地导出脚本：按模块、按人、按高风险事件导出摘要。
+- 本地 trace replay 页面或等价查询接口，服务日常排障和 showcase 决策卡片。
 
 ## 13. 参考资料
 

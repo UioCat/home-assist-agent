@@ -1,6 +1,6 @@
 # 可视化触摸屏与家庭屏幕设计
 
-本文档细化家庭 Pad、墙面触摸屏、入口屏、私有平板等可视化模块。目标是把屏幕设计成 Home Assist Agent 的安全交互入口，而不是另一个完整 Home Assistant Dashboard。
+本文档细化第一期本地 PWA/kiosk，以及长期家庭 Pad、墙面触摸屏、入口屏、私有平板等可视化模块。目标是把屏幕设计成 Home Assist Agent 的安全交互入口，而不是另一个完整 Home Assistant Dashboard。
 
 设计参考：
 
@@ -130,7 +130,7 @@ VisualDecision = {
 
 ### 3.5 VisualCard
 
-第一阶段内置卡片：
+第一期内置卡片：
 
 | 卡片 | 用途 | 默认交互 |
 | --- | --- | --- |
@@ -332,19 +332,21 @@ ScreenActionToken = {
 - `local_confirmation_decided`
 - `screen_connection_lost`
 
-## 13. MVP 实现范围
+## 13. 第一期实现范围
 
-第一阶段建议实现：
+第一期建议实现：
 
-- 一个本地 PWA/kiosk 屏幕。
+- 一个本地 PWA/kiosk，作为第一期核心产品入口，而不只是附属屏幕。
 - `DisplayGateway` WebSocket。
 - `DisplaySurface`、`ScreenSession`、`UIEvent`、`VisualDecision`、`VisualCard` 基础表。
-- ambient 首页：时间、天气、家庭模式、Agent/HA 健康、低敏摘要。
+- home 首页：时间、天气、家庭模式、Agent/HA 健康、今日提醒、待确认事项、最近执行记录。
 - room 页：当前房间低风险灯光/场景控制。
 - assistant overlay：展示 Agent 回复和任务状态。
-- confirmation queue：公共屏只能转手机确认或取消低风险请求。
-- sensitive private handoff：二维码/手机推送占位。
-- 完整审计和 E2E：公共屏开灯、Camera 事件私密交接、高风险门锁转手机。
+- confirmation queue：本地确认页处理低风险/中风险确认；公共屏只能取消低风险请求或转私密处理。
+- memory 页：查看、修改、删除个人偏好和家庭规则草案。
+- trace replay 页：展示输入、身份、策略、HA 查询、工具调用、输出和审计事件。
+- showcase mode：加载 demo 数据、决策卡片、mock 门锁/camera/OCR 注入和重置按钮。
+- 完整审计和 E2E：本地 PWA 开灯、Camera 事件私密交接、高风险门锁 dry-run。
 
 ## 14. 参考资料
 

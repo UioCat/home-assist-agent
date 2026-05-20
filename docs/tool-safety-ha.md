@@ -5,10 +5,10 @@
 ## 设计结论
 
 - Home Assistant 是设备能力、实体、服务和实时状态的事实源。
-- 本项目第一阶段不实现独立 `Capability Registry`，不维护完整 `Home State` 快照，不复制 HA 实体模型。
+- 本项目第一期不实现独立 `Capability Registry`，不维护完整 `Home State` 快照，不复制 HA 实体模型。
 - `Tool Safety Proxy` 是所有真实世界副作用工具的唯一出口。
 - `HAAdapter` 只包装 Home Assistant MCP 的调用、目标解析、返回语义和必要的状态复查，不承载用户权限和家庭策略。
-- Codex 不能直接调用原始 Home Assistant MCP 写能力。第一阶段如需快速联调，直连 HA MCP 也只能开放只读或 mock 控制。
+- Codex 不能直接调用原始 Home Assistant MCP 写能力。第一期如需快速联调，直连 HA MCP 也只能开放只读或 mock 控制。
 - 所有工具调用必须落为 `ToolInvocation`，所有策略判断必须可追溯到 `ToolPolicy`、当前 `ActorContext`、HA 实时查询结果和审计事件。
 
 ## 事实源边界
@@ -17,7 +17,7 @@ HA 是设备事实源，包含实体是否存在、实体归属、可用服务�
 
 `ToolPolicy` 只描述“谁在什么上下文下可以对哪类 HA 目标做什么”，不是 `Capability Registry`。如果 `ToolPolicy` 命中但 HA 实时查询显示实体不存在、服务不可用、状态为 `unavailable` 或 attributes 不支持目标参数，应以 HA 为准，拒绝、澄清或进入确认，而不是根据本地策略强行执行。
 
-第一阶段不维护完整 `Home State`。允许的短期缓存只能用于一次调用链内的 target 展开、before/after 复查或幂等结果复用，并必须带 `observed_at`、来源和有效期。跨请求的状态判断必须重新查询 HA。
+第一期不维护完整 `Home State`。允许的短期缓存只能用于一次调用链内的 target 展开、before/after 复查或幂等结果复用，并必须带 `observed_at`、来源和有效期。跨请求的状态判断必须重新查询 HA。
 
 ## 调用链
 
@@ -143,16 +143,16 @@ ToolPolicy = {
 | `suggestion` | 建议调灯、建议创建自动化 | 不产生副作用，可返回建议 |
 | `low_risk_write` | 开关灯、设置灯亮度、低风险插座 | 命中 allowlist 且身份可信时可直接执行 |
 | `medium_risk_write` | 空调温度、扫地机器人、音箱播报 | 按家庭规则执行，不确定则确认 |
-| `high_risk_write` | 门锁、燃气、摄像头隐私、大功率电器 | 第一阶段只创建确认请求，不直接执行 |
+| `high_risk_write` | 门锁、燃气、摄像头隐私、大功率电器 | 第一期只创建确认、拒绝或 dry-run，不真实执行 |
 | `admin_write` | 权限变更、家庭规则变更、自动化创建 | 进入确认或管理员流程 |
 
 只读不等于无风险。隐私类状态读取必须和写操作一样经过身份、来源、可见性和审计检查。
 
 ## HA Allowlist
 
-第一阶段采用显式 HA allowlist。只有 allowlist 中的 domain/service 才能通过 `HAAdapter` 调用；任意 raw HA service call 默认禁用。
+第一期采用显式 HA allowlist。只有 allowlist 中的 domain/service 才能通过 `HAAdapter` 调用；任意 raw HA service call 默认禁用。
 
-建议 MVP allowlist：
+第一期默认 allowlist：
 
 | 工具能力 | HA 范围 | 说明 |
 | --- | --- | --- |
@@ -267,7 +267,7 @@ HA 服务调用成功返回不等于设备已经完成动作。`HAAdapter` 必�
 4. 按预期变化、无变化、失败或不可确认归一化。
 5. 将原始 HA 响应和归一化结果都写入 `ToolInvocation.ha_result` 和审计。
 
-读操作也要记录 freshness，例如 `observed_at`、HA 返回时间、是否来自 HA 直接查询。第一阶段不把读结果沉淀为完整 Home State。
+读操作也要记录 freshness，例如 `observed_at`、HA 返回时间、是否来自 HA 直接查询。第一期不把读结果沉淀为完整 Home State。
 
 ## 审计字段
 
@@ -304,33 +304,35 @@ HA 服务调用成功返回不等于设备已经完成动作。`HAAdapter` 必�
 
 敏感字段不要无限期保存原始素材。摄像头截图、语音片段、群聊原文等优先保存引用、摘要、哈希和保留期限。
 
-## MVP 范围
+## 第一期范围
 
-第一阶段要做：
+第一期要做：
 
 - 定义 `ToolInvocation`、`ToolPolicy`、幂等记录和审计表。
 - 实现 `Tool Safety Proxy` 的策略判断、target 展开、相对动作规范化和确认分流。
-- 实现 `HAAdapter`，支持 HA MCP 状态查询、target 解析和 allowlist 服务调用。
+- 实现 `HAAdapter`，支持真实 HA MCP 状态查询、target 解析和 allowlist 服务调用。
 - 支持低风险灯光控制：开灯、关灯、设置绝对亮度、调暗/调亮规范化。
+- 支持明确标记低风险的 `switch.*`，并要求实体级策略标记。
 - 支持敏感只读权限判断，例如门锁状态和摄像头结果不在群聊直接暴露。
-- 支持高风险动作转 `ConfirmationRequest`，但不直接执行高风险设备。
+- 支持高风险动作转 `ConfirmationRequest`、拒绝或 dry-run，但不执行高风险真实写操作。
 - 支持 `operation_id`、`idempotency_key` 和重复请求复用结果。
 - 支持 HA 返回语义归一化。
 - 支持完整 audit trace。
+- 支持 showcase mock HA，用于演示门锁、camera/OCR 注入和故障场景。
 
-第一阶段不做：
+第一期不做：
 
 - 独立 `Capability Registry`。
 - 完整 `Home State` 快照。
 - 原始 HA MCP 写工具暴露给 Codex。
 - 任意 raw HA service call。
-- 高风险设备直接控制。
+- 高风险设备真实写控制。
 - 复杂自动化编排 UI。
 - 大规模 HA 状态缓存。后续如需缓存，只能作为加速层，不能成为事实源。
 
 ## 测试场景
 
-MVP 至少覆盖以下场景：
+第一期至少覆盖以下场景：
 
 | 场景 | 输入 | 预期 |
 | --- | --- | --- |
@@ -341,7 +343,7 @@ MVP 至少覆盖以下场景：
 | target 不明确 | “打开那个灯” 且有多个候选 | 返回澄清，不执行 |
 | 相对动作无法规范化 | 灯不支持亮度但用户说“调暗” | 拒绝或澄清，不调用 HA |
 | `toggle` 请求 | “切一下客厅灯” | 默认拒绝或要求确认，不直接调用 toggle |
-| 高风险写 | “打开前门锁” | 创建确认请求，不直接执行 |
+| 高风险写 | “打开前门锁” | 创建确认、拒绝或 dry-run，终态为 `blocked`、`dry_run` 或 `not_supported_in_phase_1`，不调用真实 HA 写接口 |
 | 语音身份不确定 | 低置信度语音说“打开门” | 拒绝或要求手机确认 |
 | 群聊敏感读取 | 群里问“家里门锁现在开着吗” | 不在群聊暴露敏感状态，转私聊或拒绝 |
 | HA 接受但状态未变 | HA 服务返回成功，after state 未变化 | 返回 `accepted` 或 `unknown`，不声称完成 |

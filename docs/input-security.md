@@ -1,18 +1,20 @@
 # 输入安全设计
 
-本文档聚焦家庭助理第一阶段的输入安全边界，覆盖输入适配器、统一消息中转、`UnifiedMessage`、`ContextBlock`、`trust_level`、prompt injection 防护，以及群聊、ASR、camera/OCR 的安全策略。
+本文档聚焦家庭助理第一期的输入安全边界，覆盖输入适配器、统一消息中转、`UnifiedMessage`、`ContextBlock`、`trust_level`、prompt injection 防护，以及本地 PWA、local API、群聊、ASR、camera/OCR 的安全策略。
 
 设计目标不是让输入层变成业务层，而是保证所有入口都带着清晰来源、身份、置信度和信任等级进入后续链路。Codex 可以理解和计划，但输入可信度、动作授权和真实世界副作用必须由 Agent 控制面和 `Tool Safety Proxy` 复核。
 
 ## 范围与不变量
 
-第一阶段输入安全只覆盖这些入口：
+第一期输入安全优先覆盖这些入口：
 
-- HTTP/mock adapter，作为微信、钉钉、飞书等聊天入口的替身。
-- 语音/mock ASR adapter。
-- camera/OCR/mock vision event adapter。
-- IoT/mock event adapter。
-- scheduler/mock timer adapter。
+- local PWA / local web UI，作为本地可用版的真实主入口。
+- local API / HTTP adapter，供 CLI、自动化脚本和测试调用，必须带本地 token。
+- scheduler/local timer adapter，用于提醒和本地任务。
+- HTTP/mock adapter，作为微信、钉钉、飞书等聊天入口的开发和 showcase 替身。
+- 语音/mock ASR adapter，用于展示和后续语音接入。
+- camera/OCR/mock vision event adapter，用于 prompt injection 和敏感内容展示场景。
+- IoT/mock event adapter，用于洗衣机完成、门窗状态等简单事件提醒。
 
 长期不变量：
 
@@ -28,7 +30,7 @@
 
 适配器必须做：
 
-- 校验平台签名、webhook token、设备密钥或本地 mock secret。
+- 校验本地 token、平台签名、webhook token、设备密钥或 showcase mock secret。
 - 生成或保留平台侧 `message_id`，并补充本项目 `trace_id`。
 - 提取 `source`、`source_user_id`、`source_conversation_id`、`timestamp`、`content_type` 和原始 payload 摘要。
 - 标记是否群聊、是否明确 @ 机器人、是否来自转发、引用、附件、OCR、ASR 或设备事件。
@@ -68,13 +70,13 @@
 
 ## 统一消息模型
 
-`UnifiedMessage` 是所有入口进入系统的唯一输入契约。第一阶段建议字段如下：
+`UnifiedMessage` 是所有入口进入系统的唯一输入契约。第一期建议字段如下：
 
 ```python
 UnifiedMessage = {
     "message_id": "string",
     "trace_id": "string",
-    "source": "wechat|dingtalk|lark|voice|iot|camera|scheduler|http_mock",
+    "source": "local_pwa|local_api|wechat|dingtalk|lark|voice|iot|camera|scheduler|http_mock",
     "source_user_id": "string|null",
     "source_conversation_id": "string|null",
     "home_id": "string|null",
@@ -339,12 +341,14 @@ OCR 注入处理：
 - OCR 或 camera 结果可以作为报警证据，例如“门口有陌生人停留”，但后续动作仍需策略判断。
 - 如果 camera 事件建议执行动作，例如“门口有人，是否打开灯”，只能生成建议或确认请求。
 
-## 第一阶段测试用例
+## 第一期测试用例
 
-第一阶段需要把下列用例做成单元测试或 E2E 回归测试。
+第一期需要把下列用例做成单元测试、E2E 回归或 showcase 固定样例。
 
 | 用例 | 输入 | 预期 |
 | --- | --- | --- |
+| 本地 PWA 低风险控制 | owner 在本地 PWA 输入“把客厅灯调暗一点” | 生成 `user_instruction`，通过 Tool Safety Proxy 执行低风险动作并审计 |
+| local API 无 token | 未携带本地 token 调用 local API 控制灯 | 拒绝，不进入 Codex 和 HA 写调用 |
 | 普通低风险文本控制 | verified 用户私聊“把客厅灯调暗一点” | 生成 `user_instruction`，通过 Tool Safety Proxy 执行低风险动作并审计 |
 | 身份未知文本控制 | 未绑定用户“打开客厅灯” | 不执行或进入绑定/澄清流程 |
 | 群聊未 @ | 群里有人说“把客厅灯关了”但未 @ 机器人 | 不执行，最多忽略或提示需要 @ |
@@ -368,28 +372,28 @@ OCR 注入处理：
 | 幂等去重 | 平台重复投递同一条开灯消息 | 只执行一次，后续命中 idempotency |
 | 事件日志恢复 | worker 在身份确认前重启 | 可从事件日志恢复到 `identity_pending`，不丢失来源和信任边界 |
 
-## 第一阶段不做事项
+## 第一期不做事项
 
-第一阶段明确不做：
+第一期明确不做：
 
-- 不接齐微信、钉钉、飞书真实生产入口，只用 HTTP/mock adapter 跑通契约。
+- 不接齐微信、钉钉、飞书真实生产入口；这些入口先用 mock adapter 或 showcase fixture 表达。
 - 不在输入适配器或消息中转层做业务授权、权限裁决或动作执行。
 - 不训练完整音色识别模型，只保留 voiceprint 结果字段和 mock 置信度。
 - 不做真实摄像头视频历史检索，只支持结构化 camera/mock OCR 事件。
 - 不把 OCR、网页、邮件、文档、设备名里的命令当作可执行指令。
-- 不支持高风险设备直接控制，包括门锁、燃气、摄像头隐私模式和大功率电器。
+- 不支持高风险设备真实写控制，包括门锁、燃气、摄像头隐私模式和大功率电器。
 - 不让 Codex 直接访问原始 HA 写工具。
-- 不实现复杂群聊多方审批，只做私聊确认或管理员确认的最小闭环。
+- 不实现复杂群聊多方审批，只做本地确认、私有输出或管理员确认的简化流程。
 - 不自动写入家庭共享记忆。
 - 不把群聊会话、家庭成员提及、camera 识别到的人或 ASR 转写文本当成授权人。
 - 不仅凭昵称、群名、备注名、设备名合并身份。
-- 不长期保存原始音频、视频帧或截图，第一阶段只保存引用、哈希、摘要和可配置保留期。
+- 不长期保存原始音频、视频帧或截图，第一期只保存引用、哈希、摘要和可配置保留期。
 
 ## 验收标准
 
-第一阶段输入安全可以认为完成，需要满足：
+第一期输入安全可以认为完成，需要满足：
 
-- 所有 mock 输入都能生成符合契约的 `UnifiedMessage`。
+- 本地 PWA、local API 和所有 mock/showcase 输入都能生成符合契约的 `UnifiedMessage`。
 - 所有进入 Codex 的外部内容都被包装为 `ContextBlock`。
 - prompt injection 样例不会产生未经授权的写操作。
 - 群聊、ASR、camera/OCR 都能产生正确的 `trust_level`。

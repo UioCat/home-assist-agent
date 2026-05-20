@@ -1,6 +1,6 @@
 # Home Assist Agent 总体架构详细设计
 
-本文档是 Home Assist Agent 的第一版总体架构详细设计，基于 README 中的架构结论整理而成。目标是把项目从“想法集合”收敛为可实现、可审计、可扩展的系统边界，并作为分层架构、架构不变量、核心契约、主请求链路、HA 事实源边界、Codex 控制边界、MVP 边界和模块依赖规则的维护入口。
+本文档是 Home Assist Agent 的第一版总体架构详细设计，基于 README 中的架构结论整理而成。目标是把项目从“想法集合”收敛为可实现、可审计、可扩展的系统边界，并作为分层架构、架构不变量、核心契约、主请求链路、HA 事实源边界、Codex 控制边界、第一期边界和模块依赖规则的维护入口。
 
 ## 1. 项目定位
 
@@ -12,6 +12,8 @@ Home Assist Agent 是一个面向家庭场景的多用户生活助理中枢，�
 
 - 统一入口：微信、钉钉、飞书、语音、IoT、Camera、Scheduler 都先进入统一消息模型。
 - 多用户助理：每个自然人有独立身份、权限、记忆、会话和 Codex 工作目录。
+- 第一期本地可用：先以单家庭、单 owner、本地 PWA、真实 HA 低风险控制、提醒、记忆和解释型审计跑通日常自用。
+- 展示增强：第一期同时提供 demo mode、决策卡片、trace replay 和 mock 高风险场景，用于客户展示。
 - 家庭共享上下文：家庭规则、设备别名、共享习惯和公共任务独立于个人记忆。
 - Codex 推理执行：Codex 负责理解意图、拆解任务、解释结果和调用受控工具。
 - 外层控制边界：身份、权限、确认、审计、幂等、任务恢复、记忆写入和通知投递由本项目控制。
@@ -227,7 +229,7 @@ Codex 推理面负责智能部分，但不拥有系统边界。
 
 1. 任何有副作用的真实世界调用不得绕过 `Tool Safety Proxy`。
 2. Home Assistant 是设备能力、实体、服务、区域和实时状态的事实源。
-3. 本项目第一阶段不维护独立 `Capability Registry`，不复制完整 `Home State`。
+3. 本项目第一期不维护独立 `Capability Registry`，不复制完整 `Home State`。
 4. Codex 可以提出动作、任务、记忆候选和确认请求，但不能拥有最终执行权。
 5. Codex 不直接写长期记忆，只能提交 `MemoryCandidate`。
 6. 身份不确定时只能低风险回复或澄清，不能读取私人记忆或执行敏感控制。
@@ -243,7 +245,7 @@ Codex 推理面负责智能部分，但不拥有系统边界。
 
 ## 4. 核心数据契约列表
 
-第一阶段实现前建议先冻结以下契约。字段可以逐步扩展，但语义边界应保持稳定。
+第一期实现前建议先冻结以下契约。字段可以逐步扩展，但语义边界应保持稳定。
 
 | 契约 | 归属模块 | 用途 | 关键约束 |
 | --- | --- | --- | --- |
@@ -357,7 +359,7 @@ Home Assistant 是家庭设备世界的事实源。本项目通过 Home Assistan
 - 维护本项目自己的安全元数据，例如高风险实体清单、用户授权、确认要求和来源限制。
 - 在审计中记录 HA 查询、控制请求、返回结果和状态确认结果。
 
-本项目第一阶段不做：
+本项目第一期不做：
 
 - 不复制 HA 的完整实体模型。
 - 不维护独立 `Capability Registry`。
@@ -367,7 +369,7 @@ Home Assistant 是家庭设备世界的事实源。本项目通过 Home Assistan
 
 缓存策略：
 
-- MVP 默认实时查询 HA。
+- 第一期默认实时查询 HA。
 - 后续如果性能、稳定性或上下文成本成为瓶颈，可以增加轻量缓存。
 - 缓存只能作为加速层，不能成为设备事实源。
 - 执行前必须以 HA 当前状态和 `Tool Safety Proxy` 检查结果为准。
@@ -412,49 +414,55 @@ Codex 不能：
 - `untrusted_content` 只能作为被分析数据，不能作为指令执行。
 - `SessionSummary`、`MemoryCandidate` 和 `ContextAssemblyRecord` 必须保留来源和信任级别，避免摘要污染。
 
-## 8. MVP 边界
+## 8. 第一期（本地可用版）边界
 
-第一阶段目标是跑通多用户、Codex、HA 安全代理、任务、确认、记忆和审计的最小闭环，而不是一次接齐所有真实入口。
+第一期目标不是最小技术闭环，而是做出用户本人可以在本地长期自用的软件版本，同时内置客户展示所需的 showcase 能力。范围入口见 [phase-1-local-usable.md](phase-1-local-usable.md)。
 
-### 8.1 MVP 包含
+### 8.1 第一期包含
 
-- 单进程 Python 服务。
-- HTTP webhook 或 mock adapter 作为统一入口。
-- SQLite 存储用户、身份、消息、任务、任务执行、确认、记忆候选、正式记忆、工具调用和审计。
+- 单进程 Python 服务或等价本地服务，支持本地配置、启动、重启恢复和健康检查。
+- 本地 PWA 或 local web UI，作为第一期主要入口，承载聊天、家庭概览、设备卡片、任务、确认、记忆和 trace replay。
+- SQLite 存储用户、身份、消息、任务、任务执行、确认、记忆候选、正式记忆、工具调用、通知决策和审计。
+- 单家庭、单 owner 的 `single_user_mode`，保留 `home_id/person_id/trust_level` 字段和长期多用户扩展边界。
 - 按 `home_id/person_id` 隔离的 Codex 文件系统工作目录。
 - `UnifiedMessage`、`ActorContext`、`ContextBlock`、`ActionPlan`、`ToolInvocation`、`Task`、`TaskRun`、`ConfirmationRequest`、`MemoryCandidate`、`AuditEvent` 等核心契约。
-- 平台身份绑定、角色、权限和基本身份合并/解绑/撤销审计。
-- `HAAdapter` 和 `Tool Safety Proxy`，支持 HA 状态查询、低风险 allowlist 控制、高风险转确认。
-- `Codex Runner` 抽象，先 mock 或真实 SDK 均可，但只暴露安全工具。
-- `Memory Write Pipeline`，支持候选记忆、正式记忆、纠正记录和上下文装配记录。
-- `Task Orchestrator`，支持一次性任务、确认任务、`TaskRun`、lease、过期和 48 小时 session maintenance。
-- 简化 `Confirmation Broker`，统一身份合并、自动化建议、共享记忆和高风险动作确认。
-- 简化 `Notification Policy`，支持原路回复、私聊、群聊和静默。
-- 全链路 `Audit Log` 和 E2E 回归样例。
+- 真实 Home Assistant 只读查询和低风险 allowlist 控制。
+- `HAAdapter` 和 `Tool Safety Proxy`，支持 HA 状态查询、target 展开、相对动作规范化、幂等、高风险阻断和审计。
+- 真实 Codex SDK 路径；mock Codex 仅用于测试、降级或 showcase。
+- `Memory Write Pipeline`，支持个人私有低风险偏好、候选记忆、正式记忆、纠正记录和上下文装配记录。
+- `Task Orchestrator`，支持一次性提醒、简单事件提醒、确认等待和单进程 worker 恢复。
+- 简化 `Confirmation Broker`，支持本地确认页、过期、拒绝、撤销、action hash 绑定和审计。
+- 简化 `Notification Policy`，支持本地 PWA 输出、owner 私有输出、静默和敏感内容不外泄。
+- 解释型审计和本地 trace replay。
+- showcase/demo mode，支持 demo seed data、决策卡片、mock 门锁/camera/OCR 注入和演示重置。
 
-### 8.2 MVP 不包含
+### 8.2 第一期不包含
 
 - 微信、钉钉、飞书等多平台完整接入。
+- 多家庭、多租户和完整跨平台身份合并。
 - 独立 `Capability Registry`。
 - 完整 `Home State` 快照。
 - 真实摄像头历史视频检索。
-- 完整音色识别模型训练。
+- 完整音色识别模型训练和反重放。
 - 复杂自动化编排 UI。
-- 高风险设备直接控制。
+- 高风险设备真实写控制。
 - 复杂向量记忆系统。
 - 多 worker 分布式调度。
+- 合规级观测平台、外部 OTel/Langfuse 导出和日志权限矩阵。
 
-### 8.3 MVP 建议落地顺序
+### 8.3 第一期建议落地顺序
 
-1. 冻结核心契约和数据库表。
-2. 建单进程服务、SQLite、HTTP/mock adapter、mock output 和 trace/audit。
-3. 做最小身份权限闭环：`home_id`、`person_id`、平台身份、角色和信任等级。
-4. 接入 `HAAdapter` 抽象和 `Tool Safety Proxy`，先用 mock 动作验证状态查询、低风险控制和高风险确认。
-5. 接 `Codex Runner` 抽象，先 mock，再接真实 SDK。
-6. 做最小记忆：approved memory 读取、候选记忆写入、家庭共享记忆确认。
-7. 做简化确认和通知。
-8. 做 Task worker：一次性任务、确认等待和 48 小时会话维护。
-9. 补 E2E 回归：低风险开灯、高风险门锁拒绝/确认、身份不确定、prompt injection、记忆候选、任务恢复。
+1. 建立本地服务、配置文件、SQLite、健康检查和本地 PWA 骨架。
+2. 建立 `single_user_mode`：默认 `home_id`、owner `person_id`、本地 token 和基础 `ActorContext`。
+3. 接入真实 HA 只读查询，完成实体/区域读取和健康显示。
+4. 接入 `Tool Safety Proxy` 和 `HAAdapter`，实现灯光 allowlist、相对动作规范化、幂等和审计。
+5. 接入真实 Codex SDK，限定只暴露受控工具；保留 mock Codex 用于测试和 demo。
+6. 做本地 PWA 的聊天、设备卡片、执行结果和 trace replay。
+7. 做一次性提醒和简单事件提醒。
+8. 做个人低风险偏好记忆和记忆管理。
+9. 做本地确认页和高风险 `blocked/dry_run/not_supported_in_phase_1` 链路。
+10. 做 showcase/demo mode：seed data、mock 门锁/camera/OCR 注入、决策卡片和重置能力。
+11. 补 E2E 回归：低风险开灯、高风险阻断、身份不确定、prompt injection、记忆候选、任务恢复、HA/Codex/审计降级。
 
 ## 9. 模块依赖规则
 

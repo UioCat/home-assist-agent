@@ -1,6 +1,6 @@
 # 通知、审计与运行保障设计
 
-本文档聚焦 Home Assist Agent 的输出层、`Notification Policy`、`Audit Log`、可观测性、离线降级恢复、数据存储、Python 工程结构和 MVP 落地顺序。
+本文档聚焦 Home Assist Agent 的输出层、`Notification Policy`、`Audit Log`、可观测性、离线降级恢复、数据存储、Python 工程结构和第一期落地顺序。
 
 更细的模块设计已拆到独立文档：原渠道回复、fallback 和投递幂等见 [消息路由与原渠道响应](message-routing.md)；按人/模块/trace 排查、日志模型和脱敏策略见 [日志、审计与可观测性](logging-observability.md)；Pad 和触摸屏展示策略见 [可视化触摸屏与家庭屏幕](visual-surfaces.md)。
 
@@ -10,7 +10,7 @@
 - 所有输出必须经过 `Notification Policy`；所有真实世界副作用必须经过 `Tool Safety Proxy`。
 - `Audit Log` 是跨模块 append-only ledger，不是输出后的普通日志。
 - 高风险动作、敏感信息、跨用户隐私和系统不完整状态下的执行结果，默认走私聊、确认、拒绝或静默记录。
-- 可观测性从第一阶段就进入 MVP，否则后续很难解释一次家庭助理行为为什么发生。
+- 可观测性从第一期就进入本地可用版，否则后续很难解释一次家庭助理行为为什么发生。
 
 ## 1. 输出层职责
 
@@ -304,7 +304,7 @@ Trace 要求：
 
 安全指标：
 
-- 高风险动作被拒绝、转确认、执行成功的比例。
+- 高风险动作被拒绝、转确认、dry-run 或长期版本执行成功的比例。
 - 身份不确定导致的澄清次数。
 - untrusted content 触发工具请求但被拦截的次数。
 - 群聊敏感内容私聊转发次数。
@@ -334,7 +334,7 @@ Trace 要求：
 | 任务恢复测试集 | worker 崩溃、lease 过期、重试、重复触发 |
 | 离线降级测试集 | Codex、消息平台、HA、数据库、Camera 不可用 |
 
-MVP 阶段应把真实审计日志抽样转成回归样例，但要先做脱敏。每条回归样例至少包含：输入摘要、身份上下文、风险等级、期望策略决策、期望通知目标、期望审计事件序列和禁止出现的泄露字段。
+第一期应把真实审计日志和 showcase trace 抽样转成回归样例，但要先做脱敏。每条回归样例至少包含：输入摘要、身份上下文、风险等级、期望策略决策、期望通知目标、期望审计事件序列和禁止出现的泄露字段。
 
 ## 7. 离线、降级和恢复
 
@@ -374,7 +374,7 @@ MVP 阶段应把真实审计日志抽样转成回归样例，但要先做脱敏�
 
 ## 8. 数据存储
 
-第一阶段优先 SQLite，长期服务可迁移 PostgreSQL。队列优先使用数据库任务表，后续再引入 Redis Streams。
+第一期优先 SQLite，长期服务可迁移 PostgreSQL。队列优先使用数据库任务表，后续再引入 Redis Streams。
 
 核心表：
 
@@ -413,7 +413,7 @@ MVP 阶段应把真实审计日志抽样转成回归样例，但要先做脱敏�
 - append-only 表只新增，不原地修改历史语义。
 - 所有外部平台 id 和 token 按最小可见原则存储。
 - 迁移脚本必须可重复执行，并在审计或运维日志中记录版本。
-- SQLite MVP 要显式开启 WAL、外键约束和事务边界；审计事件与对应业务状态变更尽量在同一事务写入，无法同事务时必须写补偿事件。
+- SQLite 第一期要显式开启 WAL、外键约束和事务边界；审计事件与对应业务状态变更尽量在同一事务写入，无法同事务时必须写补偿事件。
 
 ## 9. Python 工程结构
 
@@ -485,27 +485,28 @@ tests/
 - 通知策略配置应可测试、可版本化，不散落在平台 adapter 里。
 - 单元测试覆盖策略分支，E2E 测试覆盖完整 trace。
 
-## 10. MVP 实施顺序
+## 10. 第一期实施顺序
 
-通知、审计和运行保障部分的 MVP 应与整体 MVP 同步落地，不能等设备控制完成后再补。
+通知、审计和运行保障部分的第一期能力应与本地可用版同步落地，不能等设备控制完成后再补。
 
 建议顺序：
 
 1. 定义契约：`OutputEnvelope`、`NotificationDecision`、`AuditEvent`、`DeliveryAttempt`、trace 上下文字段。
 2. 建 SQLite 表：`messages`、`audit_events`、`notification_decisions`、`delivery_attempts`、`tasks`、`task_runs`、`confirmation_requests`、`tool_invocations`。
-3. 实现 mock output adapter：支持原路回复、私聊、群聊、静默四种结果。
-4. 实现 append-only `AuditRecorder`：覆盖入站、身份、策略、Codex mock、工具 mock、通知输出。
-5. 实现简化 `Notification Policy`：原路回复、敏感内容私聊、群聊摘要、静默、投递失败降级。
-6. 接入 `Tool Safety Proxy` mock：验证低风险控制直接输出、高风险生成确认、拒绝分支完整审计。
+3. 实现本地 PWA/local output adapter：支持本地显示、owner 私有输出、公共低敏摘要、静默四种结果。
+4. 实现 append-only `AuditRecorder`：覆盖入站、身份、策略、真实 Codex、真实低风险工具调用、demo/mock 工具和通知输出。
+5. 实现简化 `Notification Policy`：本地原路回复、敏感内容私有输出、公共摘要、静默、投递失败降级。
+6. 接入 `Tool Safety Proxy`：验证真实低风险控制直接输出、高风险确认/dry-run、拒绝分支完整审计。
 7. 接入 `Confirmation Broker`：确认创建、私聊投递、过期、拒绝、批准后重新进入执行链路。
-8. 实现基础指标：trace 延迟、Codex mock 耗时、工具成功率、通知投递结果、审计写失败。
+8. 实现基础指标：trace 延迟、Codex 耗时、工具成功率、通知投递结果、审计写失败。
 9. 实现 Task worker 恢复：一次性任务、确认等待、48 小时 session maintenance 的 trace 和审计。
-10. 建 E2E 回归：低风险开灯、高风险门锁拒绝/确认、身份不确定、prompt injection、敏感群聊转私聊、任务恢复、离线降级。
-11. 从脱敏审计样本生成第一批固定回归用例，确保策略和审计 schema 调整不会悄悄改变安全边界。
+10. 建 E2E 回归：本地 PWA 低风险开灯、高风险门锁拒绝/dry-run、身份不确定、prompt injection、敏感公共屏脱敏、任务恢复、离线降级。
+11. 建 showcase trace replay：demo seed data、决策卡片、mock camera/OCR 注入、演示重置。
+12. 从脱敏审计样本生成第一批固定回归用例，确保策略和审计 schema 调整不会悄悄改变安全边界。
 
-第一阶段完成标准：
+第一期完成标准：
 
-- 任意一次 mock 请求可以按 `trace_id` 查到从输入到输出的完整审计链。
+- 任意一次真实低风险控制、提醒触发、高风险 dry-run 或 showcase 请求可以按 `trace_id` 查到从输入到输出的完整审计链。
 - 群聊中的敏感内容不会泄露到群聊。
 - 高风险动作不会在无确认、无 HA 状态或无审计时执行。
 - 通知失败有可观察的重试、降级或告警。

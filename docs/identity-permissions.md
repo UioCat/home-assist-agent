@@ -100,7 +100,7 @@
 
 ### VoiceIdentity
 
-`VoiceIdentity` 表示音色特征与识别结果。它可以作为 `IdentityLink` 的主体之一，但在第一阶段可用 mock 或手动绑定替代完整音色训练。
+`VoiceIdentity` 表示音色特征与识别结果。它可以作为 `IdentityLink` 的主体之一，但在第一期可用 mock 或手动绑定替代完整音色训练。
 
 建议字段：
 
@@ -665,7 +665,7 @@ PolicyDecision = {
 | `suggestion` | 自动化建议、节能建议 | 可生成建议，不产生副作用 |
 | `low_risk_write` | 开灯、调亮度、关闭普通插座 | 已验证且有权限可直接执行 |
 | `medium_risk_write` | 空调、扫地机器人、热水器 | 按家庭规则执行或确认 |
-| `high_risk_write` | 门锁、燃气、摄像头隐私、大功率电器 | 必须确认和审计，MVP 不直接执行 |
+| `high_risk_write` | 门锁、燃气、摄像头隐私、大功率电器 | 必须确认和审计，第一期不真实执行 |
 | `admin_write` | 身份合并、权限变更、家庭规则变更 | owner 或管理员确认 |
 
 ## 与其他模块的接口
@@ -741,37 +741,38 @@ Tool Safety Proxy 必须重新检查身份和权限，不能只相信 Codex 的�
 
 确认通过后必须重新进入策略检查，避免身份、权限或设备状态在等待期间漂移。
 
-## MVP 范围
+## 第一期范围
 
-第一阶段必须实现：
+第一期采用 `single_user_mode`，默认单家庭、单 owner、本地 token。长期身份模型保留，但产品路径先保证本地自用。
 
-- `Person`、`HomeMembership`、`ExternalIdentity`、`IdentityLink`、`PermissionGrant` 基础表。
-- `ActorContext` 解析流程。
-- HTTP/mock adapter 的平台身份绑定。
+第一期必须实现：
+
+- `Person`、`HomeMembership`、`ExternalIdentity`、`PermissionGrant` 基础表或等价配置。
+- 初始化时 seed 一个 owner `Person`、一个 `HomeMembership` 和一个本地 `ExternalIdentity`。
+- `ActorContext` 解析流程，支持 local PWA、local API、scheduler、HTTP/mock 和 showcase 来源。
 - 单家庭内 `home_id/person_id` 解析。
-- `owner/adult/child/elder/guest/service` 角色模板。
-- 显式 `PermissionGrant` 的 allow、deny、require_confirmation。
-- `Identity Resolver` 支持平台身份绑定、双侧确认合并、解绑、撤销和审计。
-- 群聊中区分 conversation、speaker、mentioned user、target user。
-- 高风险身份动作和权限动作接入 `Confirmation Broker`。
-- 所有身份解析、合并、解绑、撤销、权限判断写入 `AuditEvent`。
-- 误合并拆分的数据结构和人工流程，即使 MVP 先只做管理接口或脚本。
+- owner 角色模板和基础 adult/demo persona 模板；child、elder、guest、service 可作为长期枚举保留。
+- 显式 allow、deny、require_confirmation 配置，第一期可来自 `tool_policies.yml` 或 SQLite 表。
+- 高风险身份动作和权限动作接入本地 `Confirmation Broker` 或管理脚本。
+- 所有身份解析、权限判断、高风险拒绝和管理动作写入 `AuditEvent`。
 
-第一阶段可以简化：
+第一期可以简化：
 
+- `IdentityLink` 合并、解绑、撤销先做数据结构和受控管理脚本，不做复杂 UI。
 - 音色识别用 mock 结果或手动绑定，不训练完整模型。
-- 多平台只接 HTTP/mock，真实微信/飞书/钉钉后续接入。
-- Person 合并先支持受控管理接口，不做复杂 UI。
+- 多平台真实接入后置；HTTP/mock 只作为测试和 showcase 来源。
+- Person 合并先支持受控管理接口，不做双侧确认流程。
 - Codex 工作目录合并先做引用迁移，不做物理内容合并。
-- ABAC 条件先覆盖来源、群聊、风险等级、home_id、实体/区域、时间有效期。
+- ABAC 条件先覆盖来源、风险等级、home_id、实体/区域、时间有效期。
 
-第一阶段不做：
+第一期不做：
 
 - 仅靠昵称或头像的自动合并。
-- 高风险设备直接控制。
+- 高风险设备真实写控制。
 - 群聊内暴露敏感私有结果。
 - 完整跨家庭身份统一画像。
 - 完整音色 enrollment 和反欺诈模型。
+- 完整访客、服务人员和跨平台身份合并拆分体验。
 
 ## 测试场景
 
