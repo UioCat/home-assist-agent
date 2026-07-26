@@ -4,6 +4,67 @@
 
 本项目不是 Home Assistant 的替代品。Home Assistant 是设备、实体、服务和实时状态的事实源；本项目负责身份、权限、安全边界、记忆、任务、确认、审计、通知，以及通过 Codex SDK 调用 Codex。
 
+## 当前可运行 MVP
+
+仓库已经包含一个本地、无鉴权的最小 Web 产品：
+
+- React 单页工作台：输入指令，选择低/中/高思考等级，查看依赖状态和执行轨迹。
+- Python/FastAPI 后端：统一提供指令与健康接口，并直接托管 React 生产构建。
+- 三类分发：直接 IoT 指令由确定性解析器处理；间接 IoT 指令由本地 Codex 规划；其余指令由本地 Codex 回答。
+- Home Assistant MCP：每次执行前读取实时工具定义，工具名和参数都经过安全策略与 JSON Schema 校验。
+- 本地 Codex 封装：使用只读、无审批、临时会话运行，并隔离用户全局 Codex 配置。
+
+当前 MVP 仅允许开、关、灯光设置和实时上下文类工具，并阻止门锁、车库门、燃气、供水和摄像头等高风险目标。一次请求最多执行一个 MCP 工具。
+
+### 前置条件
+
+- Python 3.11+
+- Node.js/npm
+- 已安装并登录的 Codex CLI，可用 `codex login status` 检查
+- 启用了 MCP Server 集成的 Home Assistant
+- 一个 Home Assistant 长期访问令牌
+
+### 配置与启动
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -e '.[dev]'
+
+cp .env.example .env
+# 编辑 .env，至少填写 HA_MCP_URL 和 HA_TOKEN
+
+cd frontend
+npm install
+npm run build
+cd ..
+
+.venv/bin/python -m home_assist_agent
+```
+
+浏览器打开 `http://127.0.0.1:8080`。默认配置不会监听外网地址，也没有鉴权；不要把该端口直接暴露到局域网或公网。
+
+开发前端时可运行 `cd frontend && npm run dev`，Vite 会把 `/api` 转发到 `127.0.0.1:8080`。
+
+### 分发行为
+
+| 类型 | 示例 | 处理路径 |
+| --- | --- | --- |
+| 直接 IoT | `打开客厅灯`、`把客厅灯调到 30%` | 本地规则解析 → HA MCP |
+| 间接 IoT | `客厅太暗了` | HA 实时安全工具 → 本地 Codex 规划 → HA MCP |
+| 其余指令 | `介绍一下你能做什么` | 本地 Codex 回答 |
+
+主要接口：
+
+- `POST /api/commands`：提交 `{"command": "...", "reasoning": "low|medium|high"}`
+- `GET /api/health`：检查后端、Codex 登录状态和 HA MCP 连接状态
+
+运行测试：
+
+```bash
+.venv/bin/pytest
+cd frontend && npm test -- --run
+```
+
 ## 核心定位
 
 - 第一期（本地可用版）：单家庭、单 owner、本地 PWA、真实 HA 低风险控制、提醒、记忆和解释型审计。
