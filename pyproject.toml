@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "home-assist-agent"
+version = "0.1.0"
+description = "Local Home Assistant MCP and Codex command router"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.116,<1",
+  "httpx>=0.28,<1",
+  "mcp>=1.24,<2",
+  "pydantic-settings>=2.10,<3",
+  "uvicorn[standard]>=0.35,<1",
+]
+
+[project.scripts]
+home-assist-agent = "home_assist_agent.__main__:main"
+
+[project.optional-dependencies]
+dev = [
+  "httpx2>=2.9,<3",
+  "pytest>=8.4,<10",
+  "pytest-asyncio>=1.1,<2",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"home_assist_agent.codex" = ["schemas/*.json"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]
