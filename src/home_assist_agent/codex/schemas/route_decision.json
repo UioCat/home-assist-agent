@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "category": {
+      "type": "string",
+      "enum": [
+        "direct_iot",
+        "indirect_iot",
+        "other"
+      ]
+    },
+    "device_command": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "turn_on",
+                "turn_off",
+                "set_brightness"
+              ]
+            },
+            "target": {
+              "type": "string"
+            },
+            "parameters_json": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "action",
+            "target",
+            "parameters_json"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "intent_summary": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "category",
+    "device_command",
+    "intent_summary"
+  ]
+}

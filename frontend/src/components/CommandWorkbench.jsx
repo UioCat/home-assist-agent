@@ -1,17 +1,15 @@
-const reasoningOptions = [
-  { value: "low", label: "低", hint: "更快" },
-  { value: "medium", label: "中", hint: "均衡" },
-  { value: "high", label: "高", hint: "深入" },
+const routingPolicy = [
+  { stage: "意图路由", level: "LOW" },
+  { stage: "设备规划", level: "MEDIUM" },
+  { stage: "普通回答", level: "HIGH" },
 ];
 
 const examples = ["打开客厅灯", "客厅太暗了", "介绍一下你能做什么"];
 
 export default function CommandWorkbench({
   command,
-  reasoning,
   isRunning,
   onCommandChange,
-  onReasoningChange,
   onSubmit,
 }) {
   return (
@@ -38,27 +36,17 @@ export default function CommandWorkbench({
         />
 
         <div className="command-controls">
-          <fieldset className="reasoning-control">
-            <legend>思考等级</legend>
-            <div className="reasoning-options">
-              {reasoningOptions.map((option) => (
-                <label key={option.value}>
-                  <input
-                    type="radio"
-                    name="reasoning"
-                    value={option.value}
-                    aria-label={option.label}
-                    checked={reasoning === option.value}
-                    onChange={() => onReasoningChange(option.value)}
-                  />
-                  <span>
-                    <strong>{option.label}</strong>
-                    <small>{option.hint}</small>
-                  </span>
-                </label>
+          <div className="routing-policy" aria-label="固定推理策略">
+            <span className="routing-policy-label">固定推理策略</span>
+            <ol>
+              {routingPolicy.map((item) => (
+                <li key={item.stage}>
+                  <span>{item.stage}</span>
+                  <code>{item.level}</code>
+                </li>
               ))}
-            </div>
-          </fieldset>
+            </ol>
+          </div>
 
           <button
             className="submit-button"

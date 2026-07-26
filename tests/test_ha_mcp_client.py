@@ -6,6 +6,7 @@ import httpx
 import pytest
 from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool
 
+from home_assist_agent.audit.recorder import InMemoryAuditRecorder
 from home_assist_agent.errors import DependencyError
 from home_assist_agent.ha.mcp_client import HomeAssistantMcpClient
 
@@ -77,9 +78,10 @@ async def test_live_mcp_tools_are_mapped_with_their_input_schema() -> None:
         url="http://homeassistant.local:8123/api/mcp",
         token="secret",
         session_factory=session_factory_for(session),
+        audit=InMemoryAuditRecorder(),
     )
 
-    tools = await client.list_tools()
+    tools = await client.list_tools("message-tools")
 
     assert len(tools) == 1
     assert tools[0].name == "assist.HassLightSet"
@@ -103,11 +105,13 @@ async def test_successful_tool_call_returns_text_content() -> None:
         url="http://homeassistant.local:8123/api/mcp",
         token="secret",
         session_factory=session_factory_for(session),
+        audit=InMemoryAuditRecorder(),
     )
 
     result = await client.call_tool(
         "assist.HassTurnOn",
         {"name": "客厅灯"},
+        "message-call",
     )
 
     assert result.tool_name == "assist.HassTurnOn"
@@ -128,10 +132,15 @@ async def test_mcp_tool_error_is_not_reported_as_success() -> None:
         url="http://homeassistant.local:8123/api/mcp",
         token="secret",
         session_factory=session_factory_for(session),
+        audit=InMemoryAuditRecorder(),
     )
 
     with pytest.raises(DependencyError) as error:
-        await client.call_tool("assist.HassTurnOn", {"name": "不存在的灯"})
+        await client.call_tool(
+            "assist.HassTurnOn",
+            {"name": "不存在的灯"},
+            "message-error",
+        )
 
     assert error.value.code == "ha_tool_failed"
 
@@ -141,10 +150,11 @@ async def test_missing_token_reports_not_configured_without_connecting() -> None
     client = HomeAssistantMcpClient(
         url="http://homeassistant.local:8123/api/mcp",
         token=None,
+        audit=InMemoryAuditRecorder(),
     )
 
     with pytest.raises(DependencyError) as error:
-        await client.list_tools()
+        await client.list_tools("message-unconfigured")
 
     assert error.value.code == "ha_not_configured"
 
@@ -170,10 +180,11 @@ async def test_http_statuses_map_to_stable_error_codes(
                 response=response,
             )
         ),
+        audit=InMemoryAuditRecorder(),
     )
 
     with pytest.raises(DependencyError) as error:
-        await client.list_tools()
+        await client.list_tools("message-status")
 
     assert error.value.code == expected_code
 
@@ -183,12 +194,11 @@ async def test_network_timeout_maps_to_ha_unavailable() -> None:
     client = HomeAssistantMcpClient(
         url="http://homeassistant.local:8123/api/mcp",
         token="secret",
-        session_factory=raising_session_factory(
-            httpx.ReadTimeout("timed out")
-        ),
+        session_factory=raising_session_factory(httpx.ReadTimeout("timed out")),
+        audit=InMemoryAuditRecorder(),
     )
 
     with pytest.raises(DependencyError) as error:
-        await client.list_tools()
+        await client.list_tools("message-timeout")
 
     assert error.value.code == "ha_unavailable"

@@ -1,6 +1,7 @@
 from collections.abc import Callable
 import shutil
 from typing import Any
+from uuid import uuid4
 
 from home_assist_agent.api.models import (
     CodexHealth,
@@ -60,7 +61,7 @@ class HealthService:
             )
         else:
             try:
-                tools = await self._ha_mcp.list_tools()
+                tools = await self._ha_mcp.list_tools(f"health-{uuid4().hex}")
                 ha_health = HaMcpHealth(
                     configured=True,
                     connected=True,

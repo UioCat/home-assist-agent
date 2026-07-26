@@ -22,7 +22,7 @@ class FakeHaMcpClient:
     tools: list[ToolDefinition]
     error: DependencyError | None = None
 
-    async def list_tools(self) -> list[ToolDefinition]:
+    async def list_tools(self, message_id: str) -> list[ToolDefinition]:
         if self.error:
             raise self.error
         return self.tools

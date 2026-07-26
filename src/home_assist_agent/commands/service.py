@@ -1,113 +1,92 @@
 from time import perf_counter
 from typing import Protocol
-from uuid import uuid4
 
-from jsonschema import validate
-from jsonschema.exceptions import SchemaError, ValidationError
-
-from home_assist_agent.commands.classifier import DirectCommandParser
 from home_assist_agent.commands.models import (
-    CodexRouteResult,
+    AnswerResult,
     CommandCategory,
     CommandResponse,
     CommandStatus,
-    ReasoningLevel,
+    DevicePlanResult,
+    RouteDecision,
     ToolCallRecord,
     ToolDefinition,
-    ToolExecutionResult,
     TraceStep,
 )
+from home_assist_agent.devices.executor import (
+    DeviceExecutionError,
+    DeviceExecutor,
+)
 from home_assist_agent.errors import DependencyError
-from home_assist_agent.ha.safety import SafetyPolicy, SafetyViolation
+from home_assist_agent.ha.safety import SafetyViolation
 
 
-class CodexGatewayProtocol(Protocol):
+class InstructionRouterProtocol(Protocol):
     async def route(
         self,
         command: str,
-        reasoning: ReasoningLevel,
-        tools: list[ToolDefinition],
-    ) -> CodexRouteResult: ...
+        message_id: str,
+        correlation_id: str | None = None,
+        causation_id: str | None = None,
+    ) -> RouteDecision: ...
 
 
-class HaMcpClientProtocol(Protocol):
-    async def list_tools(self) -> list[ToolDefinition]: ...
-
-    async def call_tool(
+class CodexServiceProtocol(Protocol):
+    async def plan_device_control(
         self,
-        name: str,
-        arguments: dict[str, object],
-    ) -> ToolExecutionResult: ...
+        command: str,
+        intent_summary: str,
+        tools: list[ToolDefinition],
+        message_id: str,
+        correlation_id: str | None = None,
+        causation_id: str | None = None,
+    ) -> DevicePlanResult: ...
+
+    async def answer(
+        self,
+        command: str,
+        message_id: str,
+        correlation_id: str | None = None,
+        causation_id: str | None = None,
+    ) -> AnswerResult: ...
 
 
-class CommandService:
+class CommandOrchestrator:
     def __init__(
         self,
-        codex: CodexGatewayProtocol,
-        ha_mcp: HaMcpClientProtocol,
-        parser: DirectCommandParser | None = None,
-        safety: SafetyPolicy | None = None,
+        router: InstructionRouterProtocol,
+        codex: CodexServiceProtocol,
+        devices: DeviceExecutor,
     ) -> None:
+        self._router = router
         self._codex = codex
-        self._ha_mcp = ha_mcp
-        self._parser = parser or DirectCommandParser()
-        self._safety = safety or SafetyPolicy()
+        self._devices = devices
 
     async def execute(
         self,
         command: str,
-        reasoning: ReasoningLevel,
+        message_id: str,
+        correlation_id: str | None = None,
+        causation_id: str | None = None,
     ) -> CommandResponse:
         started_at = perf_counter()
-        request_id = uuid4().hex
-        trace = [
-            TraceStep(stage="input", status="success", summary="收到指令")
-        ]
-
-        if direct_action := self._parser.parse(command):
+        trace = [TraceStep(stage="input", status="success", summary="收到指令")]
+        try:
+            decision = await self._router.route(
+                command,
+                message_id,
+                correlation_id,
+                causation_id,
+            )
+        except DependencyError as error:
             trace.append(
                 TraceStep(
                     stage="classify",
-                    status="success",
-                    summary="直接 IoT",
-                )
-            )
-            return await self._execute_tool(
-                request_id=request_id,
-                category=CommandCategory.DIRECT_IOT,
-                requested_name=direct_action.tool_name,
-                arguments=direct_action.arguments,
-                message="Home Assistant 已处理该指令。",
-                tools=None,
-                trace=trace,
-                started_at=started_at,
-            )
-
-        tools: list[ToolDefinition]
-        ha_error: DependencyError | None = None
-        try:
-            tools = await self._ha_mcp.list_tools()
-        except DependencyError as error:
-            tools = []
-            ha_error = error
-
-        safe_names = set(
-            self._safety.filter_tool_names([tool.name for tool in tools])
-        )
-        safe_tools = [tool for tool in tools if tool.name in safe_names]
-
-        try:
-            route_result = await self._codex.route(command, reasoning, safe_tools)
-        except DependencyError as error:
-            trace.append(
-                TraceStep(
-                    stage="dispatch",
                     status="error",
                     summary=error.message,
                 )
             )
             return self._response(
-                request_id=request_id,
+                message_id=message_id,
                 category=CommandCategory.OTHER,
                 route="codex",
                 status=CommandStatus.ERROR,
@@ -115,144 +94,196 @@ class CommandService:
                 trace=trace,
                 started_at=started_at,
                 error_code=error.code,
-            )
-
-        if route_result.category == "other":
-            trace.extend(
-                [
-                    TraceStep(
-                        stage="classify",
-                        status="success",
-                        summary="其他指令",
-                    ),
-                    TraceStep(
-                        stage="dispatch",
-                        status="success",
-                        summary="本地 Codex",
-                    ),
-                ]
-            )
-            return self._response(
-                request_id=request_id,
-                category=CommandCategory.OTHER,
-                route="codex",
-                status=CommandStatus.SUCCESS,
-                message=route_result.message,
-                trace=trace,
-                started_at=started_at,
             )
 
         trace.append(
             TraceStep(
                 stage="classify",
                 status="success",
-                summary="间接 IoT",
+                summary=self._classification_summary(decision.category),
             )
         )
-        if route_result.tool_plan is None:
-            return self._response(
-                request_id=request_id,
-                category=CommandCategory.INDIRECT_IOT,
-                route="home_assistant_mcp",
-                status=CommandStatus.ERROR,
-                message="Codex 没有返回可执行的工具计划。",
-                trace=trace,
-                started_at=started_at,
-                error_code="invalid_codex_output",
+        if decision.category == CommandCategory.DIRECT_IOT:
+            return await self._execute_direct(
+                decision,
+                message_id,
+                trace,
+                started_at,
+                correlation_id,
+                causation_id,
             )
-        if ha_error is not None:
-            trace.append(
-                TraceStep(
-                    stage="dispatch",
-                    status="error",
-                    summary=ha_error.message,
-                )
+        if decision.category == CommandCategory.INDIRECT_IOT:
+            return await self._execute_indirect(
+                command,
+                decision,
+                message_id,
+                trace,
+                started_at,
+                correlation_id,
+                causation_id,
             )
-            return self._response(
-                request_id=request_id,
-                category=CommandCategory.INDIRECT_IOT,
-                route="home_assistant_mcp",
-                status=CommandStatus.ERROR,
-                message=ha_error.message,
-                trace=trace,
-                started_at=started_at,
-                error_code=ha_error.code,
-            )
+        return await self._answer(
+            command,
+            message_id,
+            trace,
+            started_at,
+            correlation_id,
+            causation_id,
+        )
 
-        return await self._execute_tool(
-            request_id=request_id,
-            category=CommandCategory.INDIRECT_IOT,
-            requested_name=route_result.tool_plan.tool_name,
-            arguments=route_result.tool_plan.arguments,
-            message=route_result.message,
-            tools=tools,
+    async def _execute_direct(
+        self,
+        decision: RouteDecision,
+        message_id: str,
+        trace: list[TraceStep],
+        started_at: float,
+        correlation_id: str | None,
+        causation_id: str | None,
+    ) -> CommandResponse:
+        if decision.device_command is None:
+            return self._response(
+                message_id=message_id,
+                category=CommandCategory.DIRECT_IOT,
+                route="home_assistant_mcp",
+                status=CommandStatus.ERROR,
+                message="指令路由没有返回完整的设备控制指令。",
+                trace=trace,
+                started_at=started_at,
+                error_code="invalid_route_output",
+            )
+        try:
+            tool_call = await self._devices.execute_direct(
+                decision.device_command,
+                message_id,
+                correlation_id,
+                causation_id,
+            )
+        except Exception as error:
+            return self._device_error_response(
+                error=error,
+                message_id=message_id,
+                category=CommandCategory.DIRECT_IOT,
+                trace=trace,
+                started_at=started_at,
+            )
+        return self._device_success_response(
+            message_id=message_id,
+            category=CommandCategory.DIRECT_IOT,
+            message="Home Assistant 已处理该指令。",
+            tool_call=tool_call,
             trace=trace,
             started_at=started_at,
         )
 
-    async def _execute_tool(
+    async def _execute_indirect(
         self,
-        *,
-        request_id: str,
-        category: CommandCategory,
-        requested_name: str,
-        arguments: dict[str, object],
-        message: str,
-        tools: list[ToolDefinition] | None,
+        command: str,
+        decision: RouteDecision,
+        message_id: str,
         trace: list[TraceStep],
         started_at: float,
+        correlation_id: str | None,
+        causation_id: str | None,
     ) -> CommandResponse:
+        if not decision.intent_summary:
+            return self._response(
+                message_id=message_id,
+                category=CommandCategory.INDIRECT_IOT,
+                route="home_assistant_mcp",
+                status=CommandStatus.ERROR,
+                message="指令路由没有返回设备控制意图。",
+                trace=trace,
+                started_at=started_at,
+                error_code="invalid_route_output",
+            )
         try:
-            live_tools = tools if tools is not None else await self._ha_mcp.list_tools()
-            resolved_name = self._safety.resolve_tool(
-                requested_name=requested_name,
-                arguments=arguments,
-                available_tool_names=[tool.name for tool in live_tools],
+            tools = await self._devices.list_safe_tools(
+                message_id,
+                correlation_id,
+                causation_id,
             )
-            tool_definition = next(
-                tool for tool in live_tools if tool.name == resolved_name
+        except DependencyError as error:
+            return self._device_error_response(
+                error=error,
+                message_id=message_id,
+                category=CommandCategory.INDIRECT_IOT,
+                trace=trace,
+                started_at=started_at,
             )
-            try:
-                validate(
-                    instance=arguments,
-                    schema=tool_definition.input_schema,
-                )
-            except (ValidationError, SchemaError):
-                trace.append(
-                    TraceStep(
-                        stage="dispatch",
-                        status="error",
-                        summary="工具参数不符合实时 MCP schema",
-                    )
-                )
-                return self._response(
-                    request_id=request_id,
-                    category=category,
-                    route="home_assistant_mcp",
-                    status=CommandStatus.ERROR,
-                    message="工具参数不符合 Home Assistant MCP 的实时定义。",
-                    trace=trace,
-                    started_at=started_at,
-                    error_code="invalid_tool_arguments",
-                )
-            result = await self._ha_mcp.call_tool(resolved_name, arguments)
-        except SafetyViolation as error:
+        try:
+            plan_result = await self._codex.plan_device_control(
+                command,
+                decision.intent_summary,
+                tools,
+                message_id,
+                correlation_id,
+                causation_id,
+            )
+        except DependencyError as error:
             trace.append(
                 TraceStep(
-                    stage="dispatch",
-                    status="blocked",
-                    summary=error.code,
+                    stage="plan",
+                    status="error",
+                    summary=error.message,
                 )
             )
             return self._response(
-                request_id=request_id,
-                category=category,
+                message_id=message_id,
+                category=CommandCategory.INDIRECT_IOT,
                 route="home_assistant_mcp",
-                status=CommandStatus.BLOCKED,
-                message="该工具或目标不在 MVP 的安全执行范围内。",
+                status=CommandStatus.ERROR,
+                message=error.message,
                 trace=trace,
                 started_at=started_at,
                 error_code=error.code,
+            )
+        trace.append(
+            TraceStep(
+                stage="plan",
+                status="success",
+                summary="Codex medium 生成设备计划",
+            )
+        )
+        try:
+            tool_call = await self._devices.execute_plan(
+                plan_result.tool_plan,
+                tools,
+                message_id,
+                correlation_id,
+                causation_id,
+            )
+        except Exception as error:
+            return self._device_error_response(
+                error=error,
+                message_id=message_id,
+                category=CommandCategory.INDIRECT_IOT,
+                trace=trace,
+                started_at=started_at,
+            )
+        return self._device_success_response(
+            message_id=message_id,
+            category=CommandCategory.INDIRECT_IOT,
+            message=plan_result.message,
+            tool_call=tool_call,
+            trace=trace,
+            started_at=started_at,
+        )
+
+    async def _answer(
+        self,
+        command: str,
+        message_id: str,
+        trace: list[TraceStep],
+        started_at: float,
+        correlation_id: str | None,
+        causation_id: str | None,
+    ) -> CommandResponse:
+        try:
+            result = await self._codex.answer(
+                command,
+                message_id,
+                correlation_id,
+                causation_id,
             )
         except DependencyError as error:
             trace.append(
@@ -263,16 +294,79 @@ class CommandService:
                 )
             )
             return self._response(
-                request_id=request_id,
-                category=category,
-                route="home_assistant_mcp",
+                message_id=message_id,
+                category=CommandCategory.OTHER,
+                route="codex",
                 status=CommandStatus.ERROR,
                 message=error.message,
                 trace=trace,
                 started_at=started_at,
                 error_code=error.code,
             )
+        trace.append(
+            TraceStep(
+                stage="dispatch",
+                status="success",
+                summary="Codex high 普通回答",
+            )
+        )
+        return self._response(
+            message_id=message_id,
+            category=CommandCategory.OTHER,
+            route="codex",
+            status=CommandStatus.SUCCESS,
+            message=result.message,
+            trace=trace,
+            started_at=started_at,
+        )
 
+    def _device_error_response(
+        self,
+        *,
+        error: Exception,
+        message_id: str,
+        category: CommandCategory,
+        trace: list[TraceStep],
+        started_at: float,
+    ) -> CommandResponse:
+        if isinstance(error, SafetyViolation):
+            status = CommandStatus.BLOCKED
+            code = error.code
+            message = "该工具或目标不在 MVP 的安全执行范围内。"
+        elif isinstance(error, (DependencyError, DeviceExecutionError)):
+            status = CommandStatus.ERROR
+            code = error.code
+            message = error.message
+        else:
+            raise error
+        trace.append(
+            TraceStep(
+                stage="dispatch",
+                status=status,
+                summary=message,
+            )
+        )
+        return self._response(
+            message_id=message_id,
+            category=category,
+            route="home_assistant_mcp",
+            status=status,
+            message=message,
+            trace=trace,
+            started_at=started_at,
+            error_code=code,
+        )
+
+    def _device_success_response(
+        self,
+        *,
+        message_id: str,
+        category: CommandCategory,
+        message: str,
+        tool_call: ToolCallRecord,
+        trace: list[TraceStep],
+        started_at: float,
+    ) -> CommandResponse:
         trace.extend(
             [
                 TraceStep(
@@ -288,24 +382,29 @@ class CommandService:
             ]
         )
         return self._response(
-            request_id=request_id,
+            message_id=message_id,
             category=category,
             route="home_assistant_mcp",
             status=CommandStatus.SUCCESS,
             message=message,
             trace=trace,
             started_at=started_at,
-            tool_call=ToolCallRecord(
-                name=result.tool_name,
-                arguments=arguments,
-                result=result.content,
-            ),
+            tool_call=tool_call,
         )
+
+    @staticmethod
+    def _classification_summary(category: CommandCategory) -> str:
+        labels = {
+            CommandCategory.DIRECT_IOT: "直接 IoT · Codex low",
+            CommandCategory.INDIRECT_IOT: "模糊 IoT · Codex low",
+            CommandCategory.OTHER: "其他指令 · Codex low",
+        }
+        return labels[category]
 
     @staticmethod
     def _response(
         *,
-        request_id: str,
+        message_id: str,
         category: CommandCategory,
         route: str,
         status: CommandStatus,
@@ -316,7 +415,8 @@ class CommandService:
         error_code: str | None = None,
     ) -> CommandResponse:
         return CommandResponse(
-            request_id=request_id,
+            message_id=message_id,
+            request_id=message_id,
             category=category,
             route=route,
             status=status,

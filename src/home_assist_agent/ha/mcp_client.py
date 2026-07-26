@@ -9,6 +9,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import CallToolResult, ListToolsResult
 
+from home_assist_agent.audit.recorder import AuditRecorderProtocol
 from home_assist_agent.commands.models import (
     ToolDefinition,
     ToolExecutionResult,
@@ -39,15 +40,35 @@ class HomeAssistantMcpClient:
         token: str | None,
         timeout_seconds: float = 20,
         session_factory: SessionFactory | None = None,
+        audit: AuditRecorderProtocol | None = None,
     ) -> None:
         self._url = url
         self._token = token
         self._timeout_seconds = timeout_seconds
         self._session_factory = session_factory or self._open_session
+        if audit is None:
+            raise ValueError("audit recorder is required")
+        self._audit = audit
 
-    async def list_tools(self) -> list[ToolDefinition]:
-        self._require_token()
+    async def list_tools(
+        self,
+        message_id: str,
+        correlation_id: str | None = None,
+        causation_id: str | None = None,
+    ) -> list[ToolDefinition]:
+        await self._audit.record(
+            message_id=message_id,
+            event_type="external.request",
+            service="home_assistant_mcp",
+            payload={
+                "operation": "list_tools",
+                "url": self._url,
+            },
+            correlation_id=correlation_id,
+            causation_id=causation_id,
+        )
         try:
+            self._require_token()
             async with self._session_factory(
                 self._url,
                 self._token,
@@ -67,36 +88,150 @@ class HomeAssistantMcpClient:
                     )
                     cursor = result.nextCursor
                     if cursor is None:
+                        await self._audit.record(
+                            message_id=message_id,
+                            event_type="external.response",
+                            service="home_assistant_mcp",
+                            payload={
+                                "operation": "list_tools",
+                                "tools": [
+                                    tool.model_dump(mode="json") for tool in tools
+                                ],
+                            },
+                            correlation_id=correlation_id,
+                            causation_id=causation_id,
+                        )
                         return tools
-        except DependencyError:
+        except DependencyError as error:
+            await self._audit.record(
+                message_id=message_id,
+                event_type="external.response",
+                service="home_assistant_mcp",
+                payload={
+                    "operation": "list_tools",
+                    "error": error.message,
+                },
+                status="error",
+                error_code=error.code,
+                correlation_id=correlation_id,
+                causation_id=causation_id,
+            )
             raise
         except Exception as error:
-            raise self._map_error(error) from error
+            dependency_error = self._map_error(error)
+            await self._audit.record(
+                message_id=message_id,
+                event_type="external.response",
+                service="home_assistant_mcp",
+                payload={
+                    "operation": "list_tools",
+                    "error": dependency_error.message,
+                },
+                status="error",
+                error_code=dependency_error.code,
+                correlation_id=correlation_id,
+                causation_id=causation_id,
+            )
+            raise dependency_error from error
 
     async def call_tool(
         self,
         name: str,
         arguments: dict[str, Any],
+        message_id: str,
+        correlation_id: str | None = None,
+        causation_id: str | None = None,
     ) -> ToolExecutionResult:
-        self._require_token()
+        await self._audit.record(
+            message_id=message_id,
+            event_type="external.request",
+            service="home_assistant_mcp",
+            payload={
+                "operation": "call_tool",
+                "url": self._url,
+                "tool_name": name,
+                "arguments": arguments,
+            },
+            correlation_id=correlation_id,
+            causation_id=causation_id,
+        )
         try:
+            self._require_token()
             async with self._session_factory(
                 self._url,
                 self._token,
                 self._timeout_seconds,
             ) as session:
                 result = await session.call_tool(name, arguments)
-        except DependencyError:
+        except DependencyError as error:
+            await self._audit.record(
+                message_id=message_id,
+                event_type="external.response",
+                service="home_assistant_mcp",
+                payload={
+                    "operation": "call_tool",
+                    "tool_name": name,
+                    "error": error.message,
+                },
+                status="error",
+                error_code=error.code,
+                correlation_id=correlation_id,
+                causation_id=causation_id,
+            )
             raise
         except Exception as error:
-            raise self._map_error(error) from error
+            dependency_error = self._map_error(error)
+            await self._audit.record(
+                message_id=message_id,
+                event_type="external.response",
+                service="home_assistant_mcp",
+                payload={
+                    "operation": "call_tool",
+                    "tool_name": name,
+                    "error": dependency_error.message,
+                },
+                status="error",
+                error_code=dependency_error.code,
+                correlation_id=correlation_id,
+                causation_id=causation_id,
+            )
+            raise dependency_error from error
 
         content = self._content_text(result)
         if result.isError:
-            raise DependencyError(
+            error = DependencyError(
                 "ha_tool_failed",
                 content or "Home Assistant MCP 工具执行失败。",
             )
+            await self._audit.record(
+                message_id=message_id,
+                event_type="external.response",
+                service="home_assistant_mcp",
+                payload={
+                    "operation": "call_tool",
+                    "tool_name": name,
+                    "content": content,
+                    "result": result.model_dump(mode="json"),
+                },
+                status="error",
+                error_code=error.code,
+                correlation_id=correlation_id,
+                causation_id=causation_id,
+            )
+            raise error
+        await self._audit.record(
+            message_id=message_id,
+            event_type="external.response",
+            service="home_assistant_mcp",
+            payload={
+                "operation": "call_tool",
+                "tool_name": name,
+                "content": content,
+                "result": result.model_dump(mode="json"),
+            },
+            correlation_id=correlation_id,
+            causation_id=causation_id,
+        )
         return ToolExecutionResult(
             tool_name=name,
             content=content or "Home Assistant 已接受该工具调用。",

@@ -3,30 +3,82 @@ from dataclasses import dataclass, field
 import pytest
 
 from home_assist_agent.commands.models import (
-    CodexRouteResult,
+    AnswerResult,
+    DeviceCommand,
+    DevicePlanResult,
+    RouteDecision,
     ToolDefinition,
     ToolExecutionResult,
     ToolPlan,
 )
-from home_assist_agent.commands.service import CommandService
+from home_assist_agent.commands.service import CommandOrchestrator
+from home_assist_agent.devices.executor import DeviceExecutor
 from home_assist_agent.errors import DependencyError
 
 
 @dataclass
-class FakeCodexGateway:
-    result: CodexRouteResult
-    calls: list[dict[str, object]] = field(default_factory=list)
+class FakeRouter:
+    decision: RouteDecision | None = None
+    error: DependencyError | None = None
+    calls: list[tuple[str, str]] = field(default_factory=list)
 
     async def route(
         self,
         command: str,
-        reasoning: str,
+        message_id: str,
+        correlation_id: str | None = None,
+        causation_id: str | None = None,
+    ) -> RouteDecision:
+        self.calls.append((command, message_id))
+        if self.error:
+            raise self.error
+        assert self.decision is not None
+        return self.decision
+
+
+@dataclass
+class FakeCodexService:
+    plan_result: DevicePlanResult | None = None
+    answer_result: AnswerResult | None = None
+    plan_error: DependencyError | None = None
+    answer_error: DependencyError | None = None
+    plan_calls: list[dict[str, object]] = field(default_factory=list)
+    answer_calls: list[tuple[str, str]] = field(default_factory=list)
+
+    async def plan_device_control(
+        self,
+        command: str,
+        intent_summary: str,
         tools: list[ToolDefinition],
-    ) -> CodexRouteResult:
-        self.calls.append(
-            {"command": command, "reasoning": reasoning, "tools": tools}
+        message_id: str,
+        correlation_id: str | None = None,
+        causation_id: str | None = None,
+    ) -> DevicePlanResult:
+        self.plan_calls.append(
+            {
+                "command": command,
+                "intent_summary": intent_summary,
+                "tools": tools,
+                "message_id": message_id,
+            }
         )
-        return self.result
+        if self.plan_error:
+            raise self.plan_error
+        assert self.plan_result is not None
+        return self.plan_result
+
+    async def answer(
+        self,
+        command: str,
+        message_id: str,
+        correlation_id: str | None = None,
+        causation_id: str | None = None,
+    ) -> AnswerResult:
+        self.answer_calls.append((command, message_id))
+        if self.answer_error:
+            raise self.answer_error
+        assert self.answer_result is not None
+        return self.answer_result
 
 
 @dataclass
@@ -34,9 +86,16 @@ class FakeHaMcpClient:
     tools: list[ToolDefinition]
     list_error: DependencyError | None = None
     call_error: DependencyError | None = None
-    calls: list[tuple[str, dict[str, object]]] = field(default_factory=list)
+    list_calls: list[str] = field(default_factory=list)
+    calls: list[tuple[str, dict[str, object], str]] = field(default_factory=list)
 
-    async def list_tools(self) -> list[ToolDefinition]:
+    async def list_tools(
+        self,
+        message_id: str,
+        correlation_id: str | None = None,
+        causation_id: str | None = None,
+    ) -> list[ToolDefinition]:
+        self.list_calls.append(message_id)
         if self.list_error:
             raise self.list_error
         return self.tools
@@ -45,8 +104,11 @@ class FakeHaMcpClient:
         self,
         name: str,
         arguments: dict[str, object],
+        message_id: str,
+        correlation_id: str | None = None,
+        causation_id: str | None = None,
     ) -> ToolExecutionResult:
-        self.calls.append((name, arguments))
+        self.calls.append((name, arguments, message_id))
         if self.call_error:
             raise self.call_error
         return ToolExecutionResult(tool_name=name, content="Done")
@@ -55,7 +117,16 @@ class FakeHaMcpClient:
 TURN_ON = ToolDefinition(
     name="assist.HassTurnOn",
     description="Turn on a device",
-    input_schema={"type": "object", "properties": {"name": {"type": "string"}}},
+    input_schema={
+        "type": "object",
+        "properties": {"name": {"type": "string"}},
+        "required": ["name"],
+    },
+)
+TURN_OFF = ToolDefinition(
+    name="assist.HassTurnOff",
+    description="Turn off a device",
+    input_schema={"type": "object"},
 )
 LIGHT_SET = ToolDefinition(
     name="assist.HassLightSet",
@@ -64,21 +135,45 @@ LIGHT_SET = ToolDefinition(
         "type": "object",
         "properties": {
             "name": {"type": "string"},
-            "brightness": {"type": "integer", "minimum": 0, "maximum": 100},
+            "brightness": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100,
+            },
         },
+        "required": ["name", "brightness"],
     },
 )
 
 
+def build_service(
+    decision: RouteDecision,
+    ha: FakeHaMcpClient,
+    codex: FakeCodexService | None = None,
+) -> tuple[CommandOrchestrator, FakeRouter, FakeCodexService]:
+    router = FakeRouter(decision=decision)
+    active_codex = codex or FakeCodexService()
+    service = CommandOrchestrator(
+        router=router,
+        codex=active_codex,
+        devices=DeviceExecutor(ha),
+    )
+    return service, router, active_codex
+
+
 @pytest.mark.asyncio
-async def test_direct_command_bypasses_codex_and_executes_one_mcp_tool() -> None:
-    codex = FakeCodexGateway(
-        CodexRouteResult(category="other", message="should not be used")
+async def test_direct_command_routes_once_and_executes_one_mcp_tool() -> None:
+    decision = RouteDecision(
+        category="direct_iot",
+        device_command=DeviceCommand(
+            action="turn_on",
+            target="客厅灯",
+        ),
     )
     ha = FakeHaMcpClient(tools=[TURN_ON])
-    service = CommandService(codex=codex, ha_mcp=ha)
+    service, router, codex = build_service(decision, ha)
 
-    response = await service.execute("打开客厅灯", "high")
+    response = await service.execute("打开客厅灯", "message-direct")
 
     assert response.category == "direct_iot"
     assert response.status == "success"
@@ -86,15 +181,27 @@ async def test_direct_command_bypasses_codex_and_executes_one_mcp_tool() -> None
     assert response.tool_call is not None
     assert response.tool_call.name == "assist.HassTurnOn"
     assert response.tool_call.arguments == {"name": "客厅灯"}
-    assert codex.calls == []
-    assert ha.calls == [("assist.HassTurnOn", {"name": "客厅灯"})]
+    assert router.calls == [("打开客厅灯", "message-direct")]
+    assert codex.plan_calls == []
+    assert codex.answer_calls == []
+    assert ha.list_calls == ["message-direct"]
+    assert ha.calls == [
+        (
+            "assist.HassTurnOn",
+            {"name": "客厅灯"},
+            "message-direct",
+        )
+    ]
 
 
 @pytest.mark.asyncio
-async def test_indirect_command_uses_codex_plan_then_executes_one_safe_tool() -> None:
-    codex = FakeCodexGateway(
-        CodexRouteResult(
-            category="indirect_iot",
+async def test_indirect_command_plans_then_executes_one_safe_tool() -> None:
+    decision = RouteDecision(
+        category="indirect_iot",
+        intent_summary="调暗客厅灯",
+    )
+    codex = FakeCodexService(
+        plan_result=DevicePlanResult(
             message="准备把客厅灯调暗。",
             tool_plan=ToolPlan(
                 tool_name="HassLightSet",
@@ -103,43 +210,61 @@ async def test_indirect_command_uses_codex_plan_then_executes_one_safe_tool() ->
         )
     )
     ha = FakeHaMcpClient(tools=[LIGHT_SET])
-    service = CommandService(codex=codex, ha_mcp=ha)
+    service, _, _ = build_service(decision, ha, codex)
 
-    response = await service.execute("客厅太暗了", "medium")
+    response = await service.execute("客厅太暗了", "message-indirect")
 
     assert response.category == "indirect_iot"
     assert response.status == "success"
     assert response.tool_call is not None
     assert response.tool_call.name == "assist.HassLightSet"
+    assert codex.plan_calls[0]["intent_summary"] == "调暗客厅灯"
+    assert codex.answer_calls == []
+    assert ha.list_calls == ["message-indirect"]
     assert ha.calls == [
-        ("assist.HassLightSet", {"name": "客厅灯", "brightness": 30})
+        (
+            "assist.HassLightSet",
+            {"name": "客厅灯", "brightness": 30},
+            "message-indirect",
+        )
     ]
-    assert len(codex.calls) == 1
 
 
 @pytest.mark.asyncio
-async def test_other_command_returns_codex_answer_without_calling_mcp_tool() -> None:
-    codex = FakeCodexGateway(
-        CodexRouteResult(category="other", message="Home Assistant 是家庭自动化平台。")
+async def test_other_command_answers_without_any_ha_request() -> None:
+    decision = RouteDecision(category="other")
+    codex = FakeCodexService(
+        answer_result=AnswerResult(message="Home Assistant 是家庭自动化平台。")
     )
-    ha = FakeHaMcpClient(tools=[TURN_ON])
-    service = CommandService(codex=codex, ha_mcp=ha)
+    ha = FakeHaMcpClient(
+        tools=[],
+        list_error=DependencyError("ha_not_configured", "HA 尚未配置"),
+    )
+    service, _, _ = build_service(decision, ha, codex)
 
-    response = await service.execute("解释什么是 Home Assistant", "low")
+    response = await service.execute(
+        "解释什么是 Home Assistant",
+        "message-other",
+    )
 
     assert response.category == "other"
     assert response.status == "success"
     assert response.route == "codex"
     assert response.message == "Home Assistant 是家庭自动化平台。"
-    assert response.tool_call is None
+    assert codex.answer_calls == [("解释什么是 Home Assistant", "message-other")]
+    assert codex.plan_calls == []
+    assert ha.list_calls == []
     assert ha.calls == []
 
 
 @pytest.mark.asyncio
-async def test_unsafe_codex_plan_is_blocked_before_mcp_call() -> None:
-    codex = FakeCodexGateway(
-        CodexRouteResult(
-            category="indirect_iot",
+async def test_unsafe_device_plan_is_blocked_before_mcp_call() -> None:
+    decision = RouteDecision(
+        category="indirect_iot",
+        intent_summary="关闭前门锁",
+    )
+    codex = FakeCodexService(
+        plan_result=DevicePlanResult(
             message="准备处理。",
             tool_plan=ToolPlan(
                 tool_name="HassTurnOff",
@@ -147,18 +272,10 @@ async def test_unsafe_codex_plan_is_blocked_before_mcp_call() -> None:
             ),
         )
     )
-    ha = FakeHaMcpClient(
-        tools=[
-            ToolDefinition(
-                name="assist.HassTurnOff",
-                description="Turn off a device",
-                input_schema={"type": "object"},
-            )
-        ]
-    )
-    service = CommandService(codex=codex, ha_mcp=ha)
+    ha = FakeHaMcpClient(tools=[TURN_OFF])
+    service, _, _ = build_service(decision, ha, codex)
 
-    response = await service.execute("我准备出门了", "high")
+    response = await service.execute("我准备出门了", "message-unsafe")
 
     assert response.category == "indirect_iot"
     assert response.status == "blocked"
@@ -167,74 +284,59 @@ async def test_unsafe_codex_plan_is_blocked_before_mcp_call() -> None:
 
 
 @pytest.mark.asyncio
-async def test_other_codex_chat_still_works_when_ha_is_not_configured() -> None:
-    codex = FakeCodexGateway(
-        CodexRouteResult(category="other", message="你好，我可以帮助你。")
+async def test_indirect_command_reports_ha_error_before_planning() -> None:
+    decision = RouteDecision(
+        category="indirect_iot",
+        intent_summary="调亮客厅",
     )
+    codex = FakeCodexService()
     ha = FakeHaMcpClient(
         tools=[],
-        list_error=DependencyError("ha_not_configured", "HA 尚未配置"),
+        list_error=DependencyError(
+            "ha_unavailable",
+            "无法连接 Home Assistant",
+        ),
     )
-    service = CommandService(codex=codex, ha_mcp=ha)
+    service, _, _ = build_service(decision, ha, codex)
 
-    response = await service.execute("你好", "low")
+    response = await service.execute("客厅太暗了", "message-ha-error")
 
-    assert response.category == "other"
-    assert response.status == "success"
-    assert response.message == "你好，我可以帮助你。"
-    assert codex.calls[0]["tools"] == []
-
-
-@pytest.mark.asyncio
-async def test_indirect_command_reports_ha_error_when_ha_is_unavailable() -> None:
-    codex = FakeCodexGateway(
-        CodexRouteResult(
-            category="indirect_iot",
-            message="准备开灯。",
-            tool_plan=ToolPlan(
-                tool_name="HassTurnOn",
-                arguments={"name": "客厅灯"},
-            ),
-        )
-    )
-    ha = FakeHaMcpClient(
-        tools=[],
-        list_error=DependencyError("ha_unavailable", "无法连接 Home Assistant"),
-    )
-    service = CommandService(codex=codex, ha_mcp=ha)
-
-    response = await service.execute("客厅太暗了", "medium")
-
-    assert response.category == "indirect_iot"
     assert response.status == "error"
     assert response.error_code == "ha_unavailable"
+    assert codex.plan_calls == []
     assert ha.calls == []
 
 
 @pytest.mark.asyncio
 async def test_mcp_failure_is_not_reported_as_success() -> None:
-    codex = FakeCodexGateway(
-        CodexRouteResult(category="other", message="should not be used")
+    decision = RouteDecision(
+        category="direct_iot",
+        device_command=DeviceCommand(
+            action="turn_on",
+            target="客厅灯",
+        ),
     )
     ha = FakeHaMcpClient(
         tools=[TURN_ON],
         call_error=DependencyError("ha_unavailable", "工具调用失败"),
     )
-    service = CommandService(codex=codex, ha_mcp=ha)
+    service, _, _ = build_service(decision, ha)
 
-    response = await service.execute("打开客厅灯", "medium")
+    response = await service.execute("打开客厅灯", "message-mcp-error")
 
-    assert response.category == "direct_iot"
     assert response.status == "error"
     assert response.error_code == "ha_unavailable"
     assert response.tool_call is None
 
 
 @pytest.mark.asyncio
-async def test_codex_tool_arguments_must_match_live_mcp_schema() -> None:
-    codex = FakeCodexGateway(
-        CodexRouteResult(
-            category="indirect_iot",
+async def test_tool_arguments_must_match_live_mcp_schema() -> None:
+    decision = RouteDecision(
+        category="indirect_iot",
+        intent_summary="调暗客厅灯",
+    )
+    codex = FakeCodexService(
+        plan_result=DevicePlanResult(
             message="准备调灯。",
             tool_plan=ToolPlan(
                 tool_name="HassLightSet",
@@ -243,11 +345,29 @@ async def test_codex_tool_arguments_must_match_live_mcp_schema() -> None:
         )
     )
     ha = FakeHaMcpClient(tools=[LIGHT_SET])
-    service = CommandService(codex=codex, ha_mcp=ha)
+    service, _, _ = build_service(decision, ha, codex)
 
-    response = await service.execute("客厅太亮了", "medium")
+    response = await service.execute("客厅太亮了", "message-schema")
 
-    assert response.category == "indirect_iot"
     assert response.status == "error"
     assert response.error_code == "invalid_tool_arguments"
+    assert ha.calls == []
+
+
+@pytest.mark.asyncio
+async def test_router_failure_does_not_access_ha() -> None:
+    router = FakeRouter(error=DependencyError("codex_failed", "路由失败"))
+    codex = FakeCodexService()
+    ha = FakeHaMcpClient(tools=[TURN_ON])
+    service = CommandOrchestrator(
+        router=router,
+        codex=codex,
+        devices=DeviceExecutor(ha),
+    )
+
+    response = await service.execute("你好", "message-route-error")
+
+    assert response.status == "error"
+    assert response.error_code == "codex_failed"
+    assert ha.list_calls == []
     assert ha.calls == []

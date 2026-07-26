@@ -8,6 +8,7 @@ from home_assist_agent.commands.models import ReasoningLevel
 class CommandRequest(BaseModel):
     command: str = Field(min_length=1, max_length=1000)
     reasoning: ReasoningLevel = "medium"
+    message_id: str | None = Field(default=None, min_length=1, max_length=128)
 
     @field_validator("command")
     @classmethod
@@ -15,6 +16,16 @@ class CommandRequest(BaseModel):
         normalized = value.strip()
         if not normalized:
             raise ValueError("command must not be blank")
+        return normalized
+
+    @field_validator("message_id")
+    @classmethod
+    def normalize_message_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("message_id must not be blank")
         return normalized
 
 

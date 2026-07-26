@@ -12,3 +12,6 @@ frontend/dist/
 .playwright-cli/
 output/playwright/
 *.log
+data/*.db
+data/*.db-shm
+data/*.db-wal

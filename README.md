@@ -8,11 +8,13 @@
 
 仓库已经包含一个本地、无鉴权的最小 Web 产品：
 
-- React 单页工作台：输入指令，选择低/中/高思考等级，查看依赖状态和执行轨迹。
+- React 单页工作台：输入指令，查看固定路由策略、依赖状态和执行轨迹。
 - Python/FastAPI 后端：统一提供指令与健康接口，并直接托管 React 生产构建。
-- 三类分发：直接 IoT 指令由确定性解析器处理；间接 IoT 指令由本地 Codex 规划；其余指令由本地 Codex 回答。
-- Home Assistant MCP：每次执行前读取实时工具定义，工具名和参数都经过安全策略与 JSON Schema 校验。
+- 三类分发：Codex 以 `low` 判断直接控制、模糊控制或普通请求；模糊控制由 `medium` 规划设备工具；普通请求由 `high` 回答。
+- Home Assistant MCP：设备控制分支执行前读取实时工具定义，工具名和参数都经过安全策略与 JSON Schema 校验。
 - 本地 Codex 封装：使用只读、无审批、临时会话运行，并隔离用户全局 Codex 配置。
+- 事件入口：接收人员进入、就座等外部事件，按来源事件 ID 去重并更新家庭上下文；默认无规则时不调用 Codex 或 HA。
+- SQLite 追加式审计：使用同一个 `message_id` 串联用户、事件、Codex 和 Home Assistant MCP 的完整请求与响应，并通过 `correlation_id` / `causation_id` 关联场景与因果链。
 
 当前 MVP 仅允许开、关、灯光设置和实时上下文类工具，并阻止门锁、车库门、燃气、供水和摄像头等高风险目标。一次请求最多执行一个 MCP 工具。
 
@@ -41,7 +43,7 @@ cd ..
 .venv/bin/python -m home_assist_agent
 ```
 
-浏览器打开 `http://127.0.0.1:8080`。默认配置不会监听外网地址，也没有鉴权；不要把该端口直接暴露到局域网或公网。
+浏览器打开 `http://127.0.0.1:8080` 使用指令中心，打开 `http://127.0.0.1:8080/audit` 查看按 `message_id` 串联的审计中心。默认配置不会监听外网地址，也没有鉴权；不要把该端口直接暴露到局域网或公网。
 
 开发前端时可运行 `cd frontend && npm run dev`，Vite 会把 `/api` 转发到 `127.0.0.1:8080`。
 
@@ -49,14 +51,21 @@ cd ..
 
 | 类型 | 示例 | 处理路径 |
 | --- | --- | --- |
-| 直接 IoT | `打开客厅灯`、`把客厅灯调到 30%` | 本地规则解析 → HA MCP |
-| 间接 IoT | `客厅太暗了` | HA 实时安全工具 → 本地 Codex 规划 → HA MCP |
-| 其余指令 | `介绍一下你能做什么` | 本地 Codex 回答 |
+| 直接 IoT | `打开客厅灯`、`把客厅灯调到 30%` | Codex `low` 路由并输出设备指令 → HA MCP |
+| 间接 IoT | `客厅太暗了` | Codex `low` 路由 → HA 实时安全工具 → Codex `medium` 设备规划 → HA MCP |
+| 其余指令 | `介绍一下你能做什么` | Codex `low` 路由 → Codex `high` 普通回答；不访问 HA |
 
 主要接口：
 
-- `POST /api/commands`：提交 `{"command": "...", "reasoning": "low|medium|high"}`
+- `POST /api/commands`：提交 `{"command": "..."}`；兼容字段 `reasoning` 会被记录，但不影响固定执行等级
+- `POST /api/events`：接收事件并返回 `observed|duplicate|triggered`
 - `GET /api/health`：检查后端、Codex 登录状态和 HA MCP 连接状态
+- `GET /api/audit`：按时间倒序查询消息审计摘要
+- `GET /api/audit/{message_id}`：按事件顺序查询一条消息的完整审计链路
+
+`POST /api/commands` 可选传入不超过 128 个字符的 `message_id`；未传入时由后端生成。响应中的 `message_id` 和兼容字段 `request_id` 使用同一个值。审计事件默认写入 `data/audit.db`，可通过 `AUDIT_DB_PATH` 修改。
+
+事件的 `source + event_id` 是幂等键；稳定 `message_id` 会贯穿接收、上下文、规则匹配以及可能的 Codex/HA 调用。人员位置等最新事实默认写入 `data/events.db`，可通过 `EVENT_DB_PATH` 修改。当前规则引擎默认为空，因此事件只会被记录并更新上下文，不会自主控制设备。
 
 运行测试：
 

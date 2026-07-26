@@ -10,6 +10,16 @@ export async function getHealth() {
   return readJson(await fetch("/api/health"));
 }
 
+export async function getAuditMessages(limit = 50) {
+  return readJson(await fetch(`/api/audit?limit=${limit}`));
+}
+
+export async function getAuditEvents(messageId) {
+  return readJson(
+    await fetch(`/api/audit/${encodeURIComponent(messageId)}`),
+  );
+}
+
 export async function submitCommand(payload) {
   return readJson(
     await fetch("/api/commands", {

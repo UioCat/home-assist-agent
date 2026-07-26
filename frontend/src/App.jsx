@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { getHealth, submitCommand } from "./api";
+import AuditCenter from "./components/AuditCenter";
 import CommandWorkbench from "./components/CommandWorkbench";
 import ExecutionRail from "./components/ExecutionRail";
 import HealthStatus from "./components/HealthStatus";
@@ -8,9 +9,9 @@ import "./styles.css";
 
 
 export default function App() {
+  const isAuditView = window.location.pathname === "/audit";
   const [health, setHealth] = useState(null);
   const [command, setCommand] = useState("");
-  const [reasoning, setReasoning] = useState("medium");
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
   const [isRunning, setIsRunning] = useState(false);
@@ -40,7 +41,6 @@ export default function App() {
     try {
       const payload = await submitCommand({
         command: normalized,
-        reasoning,
       });
       setResult(payload);
     } catch {
@@ -53,57 +53,77 @@ export default function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <a className="brand" href="/" aria-label="Home Assist Agent 首页">
-          <span className="brand-mark" aria-hidden="true">
-            HA
-          </span>
-          <span>
-            <strong>Home Assist</strong>
-            <small>LOCAL AGENT</small>
-          </span>
-        </a>
+        <div className="topbar-main">
+          <a className="brand" href="/" aria-label="Home Assist Agent 首页">
+            <span className="brand-mark" aria-hidden="true">
+              HA
+            </span>
+            <span>
+              <strong>Home Assist</strong>
+              <small>LOCAL AGENT</small>
+            </span>
+          </a>
+          <nav className="primary-nav" aria-label="主导航">
+            <a
+              className={!isAuditView ? "primary-nav--active" : undefined}
+              href="/"
+              aria-current={!isAuditView ? "page" : undefined}
+            >
+              指令中心
+            </a>
+            <a
+              className={isAuditView ? "primary-nav--active" : undefined}
+              href="/audit"
+              aria-current={isAuditView ? "page" : undefined}
+            >
+              审计中心
+            </a>
+          </nav>
+        </div>
         <HealthStatus health={health} />
       </header>
 
-      <main className="workspace">
-        <section className="intro" aria-labelledby="page-title">
-          <p className="eyebrow">LOCAL COMMAND ROUTER</p>
-          <h1 id="page-title">家庭指令中心</h1>
-          <p>
-            输入一句话。系统会先判断它是直接控制、间接控制还是普通请求，
-            再交给 Home Assistant MCP 或本地 Codex。
-          </p>
-        </section>
+      {isAuditView ? (
+        <AuditCenter />
+      ) : (
+        <main className="workspace">
+          <section className="intro" aria-labelledby="page-title">
+            <p className="eyebrow">LOCAL COMMAND ROUTER</p>
+            <h1 id="page-title">家庭指令中心</h1>
+            <p>
+              输入一句话。系统会先判断它是直接控制、间接控制还是普通请求，
+              再交给 Home Assistant MCP 或本地 Codex。
+            </p>
+          </section>
 
-        <CommandWorkbench
-          command={command}
-          reasoning={reasoning}
-          isRunning={isRunning}
-          onCommandChange={setCommand}
-          onReasoningChange={setReasoning}
-          onSubmit={handleSubmit}
-        />
+          <CommandWorkbench
+            command={command}
+            isRunning={isRunning}
+            onCommandChange={setCommand}
+            onSubmit={handleSubmit}
+          />
 
-        <section className="result-region" aria-label="指令执行结果">
-          {error ? (
-            <div className="result-card result-card--error" role="alert">
-              <p className="result-kicker">LOCAL SERVICE ERROR</p>
-              <h2>指令未发送</h2>
-              <p>{error}</p>
-            </div>
-          ) : result ? (
-            <ExecutionRail result={result} />
-          ) : (
-            <div className="result-empty">
-              <span className="empty-index">01—04</span>
-              <div>
-                <h2>等待第一条指令</h2>
-                <p>执行后，这里会显示分类、分发、工具调用和真实回执。</p>
+          <section className="result-region" aria-label="指令执行结果">
+            {error ? (
+              <div className="result-card result-card--error" role="alert">
+                <p className="result-kicker">LOCAL SERVICE ERROR</p>
+                <h2>指令未发送</h2>
+                <p>{error}</p>
               </div>
-            </div>
-          )}
-        </section>
-      </main>
+            ) : result ? (
+              <ExecutionRail result={result} />
+            ) : (
+              <div className="result-empty">
+                <span className="empty-index">01—04</span>
+                <div>
+                  <h2>等待第一条指令</h2>
+                  <p>执行后，这里会显示分类、分发、工具调用和真实回执。</p>
+                </div>
+              </div>
+            )}
+          </section>
+        </main>
+      )}
     </div>
   );
 }

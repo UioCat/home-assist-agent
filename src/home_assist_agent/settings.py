@@ -18,3 +18,5 @@ class AppSettings(BaseSettings):
     ha_mcp_timeout_seconds: float = 20
     codex_binary: str = "codex"
     frontend_dist: Path = Path("frontend/dist")
+    audit_db_path: Path = Path("data/audit.db")
+    event_db_path: Path = Path("data/events.db")

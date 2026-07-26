@@ -58,10 +58,89 @@ class ToolPlan(BaseModel):
         return json.loads(self.arguments_json)
 
 
-class CodexRouteResult(BaseModel):
-    category: Literal["indirect_iot", "other"]
+class DeviceCommand(BaseModel):
+    action: Literal["turn_on", "turn_off", "set_brightness"]
+    target: str = Field(min_length=1, max_length=200)
+    parameters_json: str = "{}"
+
+    @model_validator(mode="before")
+    @classmethod
+    def encode_internal_parameters(cls, value: Any) -> Any:
+        if (
+            isinstance(value, dict)
+            and "parameters" in value
+            and "parameters_json" not in value
+        ):
+            normalized = dict(value)
+            parameters = normalized.pop("parameters")
+            normalized["parameters_json"] = json.dumps(
+                parameters,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            return normalized
+        return value
+
+    @field_validator("parameters_json")
+    @classmethod
+    def require_json_object(cls, value: str) -> str:
+        try:
+            parameters = json.loads(value)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise ValueError("parameters_json must be valid JSON") from error
+        if not isinstance(parameters, dict):
+            raise ValueError("parameters_json must encode a JSON object")
+        return value
+
+    @model_validator(mode="after")
+    def validate_action_parameters(self) -> "DeviceCommand":
+        brightness = self.parameters.get("brightness")
+        if self.action == "set_brightness":
+            if (
+                isinstance(brightness, bool)
+                or not isinstance(brightness, int)
+                or not 0 <= brightness <= 100
+            ):
+                raise ValueError(
+                    "set_brightness requires integer brightness from 0 to 100"
+                )
+        elif brightness is not None:
+            raise ValueError("brightness is only valid for set_brightness")
+        return self
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return json.loads(self.parameters_json)
+
+
+class RouteDecision(BaseModel):
+    category: CommandCategory
+    device_command: DeviceCommand | None = None
+    intent_summary: str | None = None
+
+    @model_validator(mode="after")
+    def validate_category_payload(self) -> "RouteDecision":
+        if self.category == CommandCategory.DIRECT_IOT:
+            if self.device_command is None:
+                raise ValueError("direct_iot requires device_command")
+        elif self.device_command is not None:
+            raise ValueError("device_command is only valid for direct_iot")
+
+        if self.category == CommandCategory.INDIRECT_IOT:
+            if not self.intent_summary or not self.intent_summary.strip():
+                raise ValueError("indirect_iot requires intent_summary")
+        elif self.intent_summary is not None:
+            raise ValueError("intent_summary is only valid for indirect_iot")
+        return self
+
+
+class DevicePlanResult(BaseModel):
     message: str
-    tool_plan: ToolPlan | None = None
+    tool_plan: ToolPlan
+
+
+class AnswerResult(BaseModel):
+    message: str
 
 
 class ToolDefinition(BaseModel):
@@ -88,6 +167,7 @@ class TraceStep(BaseModel):
 
 
 class CommandResponse(BaseModel):
+    message_id: str
     request_id: str
     category: CommandCategory
     route: Literal["home_assistant_mcp", "codex"]
@@ -97,3 +177,15 @@ class CommandResponse(BaseModel):
     trace: list[TraceStep] = Field(default_factory=list)
     elapsed_ms: int = 0
     error_code: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def synchronize_message_id(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        message_id = normalized.get("message_id") or normalized.get("request_id")
+        if message_id is not None:
+            normalized["message_id"] = message_id
+            normalized["request_id"] = message_id
+        return normalized

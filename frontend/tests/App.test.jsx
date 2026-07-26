@@ -79,15 +79,17 @@ describe("Home Assist Agent", () => {
     expect(screen.getByText("HA MCP · 4 个工具")).toBeInTheDocument();
   });
 
-  it("submits the selected reasoning level and renders the execution rail", async () => {
+  it("submits the command with fixed routing policy and renders the execution rail", async () => {
     const user = userEvent.setup();
     render(<App />);
 
+    expect(screen.getByLabelText("固定推理策略")).toHaveTextContent(
+      "意图路由LOW设备规划MEDIUM普通回答HIGH",
+    );
     await user.type(
       screen.getByRole("textbox", { name: "家庭指令" }),
       "打开客厅灯",
     );
-    await user.click(screen.getByRole("radio", { name: "高" }));
     await user.click(screen.getByRole("button", { name: "执行指令" }));
 
     await waitFor(() => {
@@ -97,7 +99,6 @@ describe("Home Assist Agent", () => {
           method: "POST",
           body: JSON.stringify({
             command: "打开客厅灯",
-            reasoning: "high",
           }),
         }),
       );

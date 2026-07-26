@@ -78,6 +78,8 @@ def test_settings_load_ha_connection_from_environment(monkeypatch) -> None:
     monkeypatch.setenv("HA_MCP_URL", "http://ha.local:8123/api/mcp")
     monkeypatch.setenv("HA_TOKEN", "top-secret")
     monkeypatch.setenv("HA_MCP_TIMEOUT_SECONDS", "12")
+    monkeypatch.setenv("AUDIT_DB_PATH", "runtime/audit.db")
+    monkeypatch.setenv("EVENT_DB_PATH", "runtime/events.db")
 
     settings = AppSettings(_env_file=None)
 
@@ -85,6 +87,8 @@ def test_settings_load_ha_connection_from_environment(monkeypatch) -> None:
     assert settings.ha_token is not None
     assert settings.ha_token.get_secret_value() == "top-secret"
     assert settings.ha_mcp_timeout_seconds == 12
+    assert settings.audit_db_path == Path("runtime/audit.db")
+    assert settings.event_db_path == Path("runtime/events.db")
 
 
 def test_default_runtime_builds_without_ha_credentials(tmp_path: Path) -> None:
@@ -98,6 +102,7 @@ def test_default_runtime_builds_without_ha_credentials(tmp_path: Path) -> None:
 
     route_paths = {route.path for route in app.routes}
     assert "/api/commands" in route_paths
+    assert "/api/events" in route_paths
     assert "/api/health" in route_paths
 
 
@@ -122,9 +127,12 @@ def test_runtime_serves_built_frontend(tmp_path: Path) -> None:
     client = TestClient(build_app(settings))
 
     index_response = client.get("/")
+    audit_response = client.get("/audit")
     asset_response = client.get("/assets/app.js")
     assert index_response.status_code == 200
+    assert audit_response.status_code == 200
     assert "Home Assist Agent" in index_response.text
+    assert "Home Assist Agent" in audit_response.text
     assert asset_response.status_code == 200
     assert "console.log" in asset_response.text
 
