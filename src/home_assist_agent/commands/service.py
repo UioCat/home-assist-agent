@@ -41,6 +41,7 @@ from home_assist_agent.resolution.verifier import (
 )
 from home_assist_agent.terms.models import (
     FeedbackOutcome,
+    HomePromotionOutcome,
     ResolutionAttempt,
     TermLearningOutcome,
     TermMapping,
@@ -129,6 +130,24 @@ class TermLearningProtocol(Protocol):
         now: datetime,
     ) -> FeedbackOutcome: ...
 
+    async def request_home_promotion(
+        self,
+        *,
+        actor: ActorContext,
+        text: str,
+        message_id: str,
+        now: datetime,
+    ) -> HomePromotionOutcome: ...
+
+    async def confirm_home_promotion(
+        self,
+        *,
+        actor: ActorContext,
+        text: str,
+        message_id: str,
+        now: datetime,
+    ) -> HomePromotionOutcome: ...
+
 
 class CommandOrchestrator:
     def __init__(
@@ -195,6 +214,41 @@ class CommandOrchestrator:
                 )
             if self._term_learning is not None:
                 try:
+                    home_promotion = (
+                        await self._term_learning.confirm_home_promotion(
+                            actor=actor,
+                            text=command,
+                            message_id=message_id,
+                            now=self._clock(),
+                        )
+                    )
+                    if not home_promotion.handled:
+                        home_promotion = (
+                            await self._term_learning.request_home_promotion(
+                                actor=actor,
+                                text=command,
+                                message_id=message_id,
+                                now=self._clock(),
+                            )
+                        )
+                    if home_promotion.handled:
+                        return self._response(
+                            message_id=message_id,
+                            category=CommandCategory.OTHER,
+                            route="codex",
+                            status=(
+                                CommandStatus.NEEDS_INPUT
+                                if home_promotion.requires_confirmation
+                                else CommandStatus.SUCCESS
+                            ),
+                            message=(
+                                home_promotion.message
+                                or "已处理家庭共享称呼。"
+                            ),
+                            trace=trace,
+                            started_at=started_at,
+                            warnings=list(home_promotion.warnings),
+                        )
                     feedback = await self._term_learning.handle_feedback(
                         actor=actor,
                         text=command,

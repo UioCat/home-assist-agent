@@ -139,3 +139,20 @@ class FeedbackOutcome(ImmutableModel):
     mapping: TermMapping | None = None
     replacement_expression: str | None = None
     warnings: tuple[str, ...] = ()
+
+
+class PromotionSummary(ImmutableModel):
+    checked_mapping_ids: tuple[str, ...] = ()
+    approved_mapping_ids: tuple[str, ...] = ()
+    skipped_mapping_ids: tuple[str, ...] = ()
+
+
+class HomePromotionOutcome(ImmutableModel):
+    handled: bool
+    requires_confirmation: bool = False
+    message: str | None = None
+    request: HomePromotionRequest | None = None
+    mapping: TermMapping | None = None
+    warnings: tuple[str, ...] = ()
+    conflict_existing_entity_ids: tuple[str, ...] = ()
+    conflict_requested_entity_ids: tuple[str, ...] = ()

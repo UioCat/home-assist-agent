@@ -1,12 +1,14 @@
 from home_assist_agent.terms.models import (
     HomePromotionRequest,
     HomePromotionStatus,
+    HomePromotionOutcome,
     FeedbackOutcome,
     ResolutionAttempt,
     TermMapping,
     TermScope,
     TermStatus,
     TermLearningOutcome,
+    PromotionSummary,
 )
 from home_assist_agent.terms.service import (
     DeterministicCorrectionResolver,
@@ -17,6 +19,7 @@ from home_assist_agent.terms.store import SQLiteTermStore, TermConflictError
 __all__ = [
     "HomePromotionRequest",
     "HomePromotionStatus",
+    "HomePromotionOutcome",
     "FeedbackOutcome",
     "ResolutionAttempt",
     "SQLiteTermStore",
@@ -25,6 +28,7 @@ __all__ = [
     "TermScope",
     "TermStatus",
     "TermLearningOutcome",
+    "PromotionSummary",
     "TermLearningService",
     "DeterministicCorrectionResolver",
 ]

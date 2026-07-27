@@ -21,6 +21,9 @@ from home_assist_agent.resolution.verifier import (
 )
 from home_assist_agent.terms.models import (
     FeedbackOutcome,
+    HomePromotionOutcome,
+    HomePromotionRequest,
+    HomePromotionStatus,
     TermLearningOutcome,
     TermMapping,
     TermScope,
@@ -46,6 +49,35 @@ class TermLearningStoreProtocol(Protocol):
     ) -> TermMapping: ...
 
     async def create_approved(self, **kwargs: Any) -> TermMapping: ...
+
+    async def latest_personal_term(
+        self,
+        actor: ActorContext,
+    ) -> TermMapping | None: ...
+
+    async def create_home_promotion(
+        self,
+        **kwargs: Any,
+    ) -> HomePromotionRequest: ...
+
+    async def latest_home_promotion(
+        self,
+        actor: ActorContext,
+    ) -> HomePromotionRequest | None: ...
+
+    async def set_home_promotion_status(
+        self,
+        promotion_id: str,
+        status: HomePromotionStatus,
+        message_id: str,
+        *,
+        now: datetime,
+    ) -> HomePromotionRequest: ...
+
+    async def current_mapping(
+        self,
+        mapping_id: str,
+    ) -> TermMapping | None: ...
 
 
 class CorrectionResolverProtocol(Protocol):
@@ -350,6 +382,140 @@ class TermLearningService:
             message="已按你的纠正更新个人称呼。",
             mapping=mapping,
             replacement_expression=replacement,
+        )
+
+    async def request_home_promotion(
+        self,
+        *,
+        actor: ActorContext,
+        text: str,
+        message_id: str,
+        now: datetime,
+    ) -> HomePromotionOutcome:
+        if "全家都这么叫" not in text:
+            return HomePromotionOutcome(handled=False)
+        mapping = await self._store.latest_personal_term(actor)
+        if mapping is None:
+            return HomePromotionOutcome(
+                handled=True,
+                message="没有可提升为家庭共享的个人称呼。",
+                warnings=("personal_term_not_found",),
+            )
+        request = await self._store.create_home_promotion(
+            actor=actor,
+            mapping_id=mapping.mapping_id,
+            message_id=message_id,
+            now=now,
+        )
+        return HomePromotionOutcome(
+            handled=True,
+            requires_confirmation=True,
+            message=(
+                f"确认把“{mapping.display_term}”设为全家共享称呼吗？"
+            ),
+            request=request,
+        )
+
+    async def confirm_home_promotion(
+        self,
+        *,
+        actor: ActorContext,
+        text: str,
+        message_id: str,
+        now: datetime,
+    ) -> HomePromotionOutcome:
+        request = await self._store.latest_home_promotion(actor)
+        if request is None:
+            return HomePromotionOutcome(handled=False)
+        if now >= request.expires_at:
+            expired = await self._store.set_home_promotion_status(
+                request.promotion_id,
+                HomePromotionStatus.EXPIRED,
+                message_id,
+                now=now,
+            )
+            return HomePromotionOutcome(
+                handled=True,
+                message="家庭共享确认已超时。",
+                request=expired,
+                warnings=("home_promotion_expired",),
+            )
+        normalized = text.strip().casefold()
+        if normalized in {"取消", "否", "不确认", "不用"}:
+            cancelled = await self._store.set_home_promotion_status(
+                request.promotion_id,
+                HomePromotionStatus.CANCELLED,
+                message_id,
+                now=now,
+            )
+            return HomePromotionOutcome(
+                handled=True,
+                message="已取消家庭共享。",
+                request=cancelled,
+            )
+        if normalized not in {"确认", "是", "确定", "确认共享"}:
+            return HomePromotionOutcome(handled=False)
+        mapping = await self._store.current_mapping(request.mapping_id)
+        if (
+            mapping is None
+            or mapping.home_id != actor.home_id
+            or mapping.person_id != actor.person_id
+        ):
+            cancelled = await self._store.set_home_promotion_status(
+                request.promotion_id,
+                HomePromotionStatus.CANCELLED,
+                message_id,
+                now=now,
+            )
+            return HomePromotionOutcome(
+                handled=True,
+                message="原个人称呼已失效，无法共享。",
+                request=cancelled,
+                warnings=("personal_term_not_found",),
+            )
+        try:
+            shared = await self._store.create_approved(
+                actor=actor,
+                scope=TermScope.HOME,
+                display_term=mapping.display_term,
+                entity_ids=mapping.target_entity_ids,
+                source_message_id=message_id,
+                source_candidate_id=mapping.source_candidate_id,
+                catalog_version=mapping.catalog_version,
+                now=now,
+                evidence={
+                    "confirmed_home_promotion": True,
+                    "source_mapping_id": mapping.mapping_id,
+                },
+            )
+        except TermConflictError as error:
+            cancelled = await self._store.set_home_promotion_status(
+                request.promotion_id,
+                HomePromotionStatus.CANCELLED,
+                message_id,
+                now=now,
+            )
+            return HomePromotionOutcome(
+                handled=True,
+                message="家庭共享称呼已存在且目标不同，请先处理冲突。",
+                request=cancelled,
+                warnings=("home_term_conflict",),
+                conflict_existing_entity_ids=(
+                    error.existing.target_entity_ids
+                ),
+                conflict_requested_entity_ids=mapping.target_entity_ids,
+            )
+        confirmed = await self._store.set_home_promotion_status(
+            request.promotion_id,
+            HomePromotionStatus.CONFIRMED,
+            message_id,
+            now=now,
+        )
+        return HomePromotionOutcome(
+            handled=True,
+            message="已设为家庭共享称呼。",
+            request=confirmed,
+            mapping=shared,
         )
 
     @staticmethod

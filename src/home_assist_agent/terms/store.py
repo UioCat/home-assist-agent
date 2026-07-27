@@ -11,6 +11,8 @@ from home_assist_agent.errors import DependencyError
 from home_assist_agent.resolution.models import ActorContext
 from home_assist_agent.resolution.normalize import normalize_term
 from home_assist_agent.terms.models import (
+    HomePromotionRequest,
+    HomePromotionStatus,
     ResolutionAttempt,
     TermMapping,
     TermScope,
@@ -330,6 +332,112 @@ class SQLiteTermStore:
     async def revision_count(self, mapping_id: str) -> int:
         return await asyncio.to_thread(self._revision_count_sync, mapping_id)
 
+    async def current_mapping(
+        self,
+        mapping_id: str,
+    ) -> TermMapping | None:
+        return await asyncio.to_thread(
+            self._load_current_mapping_sync,
+            mapping_id,
+        )
+
+    async def due_provisionals(
+        self,
+        now: datetime,
+    ) -> list[TermMapping]:
+        return await asyncio.to_thread(self._due_provisionals_sync, now)
+
+    async def latest_personal_term(
+        self,
+        actor: ActorContext,
+    ) -> TermMapping | None:
+        return await asyncio.to_thread(
+            self._latest_personal_term_sync,
+            actor,
+        )
+
+    async def create_home_promotion(
+        self,
+        *,
+        actor: ActorContext,
+        mapping_id: str,
+        message_id: str,
+        now: datetime,
+        timeout_seconds: int = 600,
+    ) -> HomePromotionRequest:
+        existing = await asyncio.to_thread(
+            self._latest_home_promotion_for_mapping_sync,
+            actor,
+            mapping_id,
+        )
+        if existing is not None and existing.status == HomePromotionStatus.PENDING:
+            return existing
+        request = HomePromotionRequest(
+            promotion_id=uuid4().hex,
+            revision_id=uuid4().hex,
+            revision=1,
+            mapping_id=mapping_id,
+            home_id=actor.home_id,
+            person_id=actor.person_id,
+            status=HomePromotionStatus.PENDING,
+            source_message_id=message_id,
+            created_at=now,
+            expires_at=now + timedelta(seconds=timeout_seconds),
+            updated_at=now,
+        )
+        return await self._insert_home_promotion(
+            request,
+            message_id=message_id,
+            operation="create_home_promotion",
+            event_type="home_promotion.requested",
+        )
+
+    async def set_home_promotion_status(
+        self,
+        promotion_id: str,
+        status: HomePromotionStatus,
+        message_id: str,
+        *,
+        now: datetime,
+    ) -> HomePromotionRequest:
+        current = await self.current_home_promotion(promotion_id)
+        if current is None:
+            raise TermStateError("home_promotion_not_found")
+        if current.status == status:
+            return current
+        revised = current.model_copy(
+            update={
+                "revision_id": uuid4().hex,
+                "revision": current.revision + 1,
+                "status": status,
+                "updated_at": now,
+            }
+        )
+        return await self._insert_home_promotion(
+            revised,
+            message_id=message_id,
+            operation=f"home_promotion_{status.value}",
+            event_type=f"home_promotion.{status.value}",
+        )
+
+    async def current_home_promotion(
+        self,
+        promotion_id: str,
+    ) -> HomePromotionRequest | None:
+        return await asyncio.to_thread(
+            self._current_home_promotion_sync,
+            promotion_id,
+        )
+
+    async def latest_home_promotion(
+        self,
+        actor: ActorContext,
+    ) -> HomePromotionRequest | None:
+        return await asyncio.to_thread(
+            self._latest_home_promotion_sync,
+            actor,
+        )
+
     async def _require_current(self, mapping_id: str) -> TermMapping:
         mapping = await asyncio.to_thread(
             self._load_current_mapping_sync,
@@ -415,6 +523,39 @@ class SQLiteTermStore:
         )
         return mapping
 
+    async def _insert_home_promotion(
+        self,
+        request: HomePromotionRequest,
+        *,
+        message_id: str,
+        operation: str,
+        event_type: str,
+    ) -> HomePromotionRequest:
+        await self._record_write_request(
+            message_id,
+            operation,
+            request.model_dump(mode="json"),
+        )
+        try:
+            await asyncio.to_thread(
+                self._insert_home_promotion_sync,
+                request,
+                message_id,
+            )
+        except (OSError, sqlite3.Error, TypeError, ValueError) as error:
+            await self._record_write_failure(message_id, operation, error)
+            raise DependencyError(
+                "term_store_unavailable",
+                "术语存储写入失败。",
+            ) from error
+        await self._audit.record(
+            message_id=message_id,
+            event_type=event_type,
+            service="term_store",
+            payload=request.model_dump(mode="json"),
+        )
+        return request
+
     async def _record_write_request(
         self,
         message_id: str,
@@ -494,6 +635,27 @@ class SQLiteTermStore:
                 payload_json TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS home_promotion_revisions (
+                revision_id TEXT PRIMARY KEY,
+                promotion_id TEXT NOT NULL,
+                revision INTEGER NOT NULL,
+                mapping_id TEXT NOT NULL,
+                home_id TEXT NOT NULL,
+                person_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                source_message_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                change_message_id TEXT NOT NULL,
+                UNIQUE(promotion_id, revision)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_home_promotion_current
+            ON home_promotion_revisions(
+                home_id, person_id, promotion_id, revision
+            );
+
             CREATE TRIGGER IF NOT EXISTS term_revisions_no_update
             BEFORE UPDATE ON term_mapping_revisions
             BEGIN
@@ -516,6 +678,18 @@ class SQLiteTermStore:
             BEFORE DELETE ON resolution_attempts
             BEGIN
                 SELECT RAISE(ABORT, 'resolution attempts are append-only');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS home_promotions_no_update
+            BEFORE UPDATE ON home_promotion_revisions
+            BEGIN
+                SELECT RAISE(ABORT, 'home promotions are append-only');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS home_promotions_no_delete
+            BEFORE DELETE ON home_promotion_revisions
+            BEGIN
+                SELECT RAISE(ABORT, 'home promotions are append-only');
             END;
             """
         )
@@ -686,6 +860,150 @@ class SQLiteTermStore:
             ).fetchone()
         return int(row[0])
 
+    def _due_provisionals_sync(
+        self,
+        now: datetime,
+    ) -> list[TermMapping]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT current.*
+                FROM term_mapping_revisions AS current
+                JOIN (
+                    SELECT mapping_id, MAX(revision) AS revision
+                    FROM term_mapping_revisions
+                    GROUP BY mapping_id
+                ) AS latest
+                  ON latest.mapping_id = current.mapping_id
+                 AND latest.revision = current.revision
+                WHERE current.status = 'provisional'
+                  AND current.promote_at <= ?
+                ORDER BY current.promote_at, current.mapping_id
+                """,
+                (now.isoformat(),),
+            ).fetchall()
+        return [self._row_to_mapping(row) for row in rows]
+
+    def _latest_personal_term_sync(
+        self,
+        actor: ActorContext,
+    ) -> TermMapping | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT current.*
+                FROM term_mapping_revisions AS current
+                JOIN (
+                    SELECT mapping_id, MAX(revision) AS revision
+                    FROM term_mapping_revisions
+                    GROUP BY mapping_id
+                ) AS latest
+                  ON latest.mapping_id = current.mapping_id
+                 AND latest.revision = current.revision
+                WHERE current.home_id = ?
+                  AND current.scope = 'person'
+                  AND current.person_id = ?
+                  AND current.status IN ('provisional', 'approved')
+                ORDER BY current.updated_at DESC, current.mapping_id DESC
+                LIMIT 1
+                """,
+                (actor.home_id, actor.person_id),
+            ).fetchone()
+        return self._row_to_mapping(row) if row is not None else None
+
+    def _insert_home_promotion_sync(
+        self,
+        request: HomePromotionRequest,
+        change_message_id: str,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO home_promotion_revisions (
+                    revision_id, promotion_id, revision, mapping_id,
+                    home_id, person_id, status, source_message_id,
+                    created_at, expires_at, updated_at, change_message_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    request.revision_id,
+                    request.promotion_id,
+                    request.revision,
+                    request.mapping_id,
+                    request.home_id,
+                    request.person_id,
+                    request.status.value,
+                    request.source_message_id,
+                    request.created_at.isoformat(),
+                    request.expires_at.isoformat(),
+                    request.updated_at.isoformat(),
+                    change_message_id,
+                ),
+            )
+
+    def _current_home_promotion_sync(
+        self,
+        promotion_id: str,
+    ) -> HomePromotionRequest | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM home_promotion_revisions
+                WHERE promotion_id = ?
+                ORDER BY revision DESC
+                LIMIT 1
+                """,
+                (promotion_id,),
+            ).fetchone()
+        return self._row_to_home_promotion(row) if row is not None else None
+
+    def _latest_home_promotion_sync(
+        self,
+        actor: ActorContext,
+    ) -> HomePromotionRequest | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT current.*
+                FROM home_promotion_revisions AS current
+                JOIN (
+                    SELECT promotion_id, MAX(revision) AS revision
+                    FROM home_promotion_revisions
+                    GROUP BY promotion_id
+                ) AS latest
+                  ON latest.promotion_id = current.promotion_id
+                 AND latest.revision = current.revision
+                WHERE current.home_id = ?
+                  AND current.person_id = ?
+                  AND current.status = 'pending'
+                ORDER BY current.updated_at DESC, current.promotion_id DESC
+                LIMIT 1
+                """,
+                (actor.home_id, actor.person_id),
+            ).fetchone()
+        return self._row_to_home_promotion(row) if row is not None else None
+
+    def _latest_home_promotion_for_mapping_sync(
+        self,
+        actor: ActorContext,
+        mapping_id: str,
+    ) -> HomePromotionRequest | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM home_promotion_revisions
+                WHERE home_id = ?
+                  AND person_id = ?
+                  AND mapping_id = ?
+                ORDER BY revision DESC
+                LIMIT 1
+                """,
+                (actor.home_id, actor.person_id, mapping_id),
+            ).fetchone()
+        return self._row_to_home_promotion(row) if row is not None else None
+
     def _save_resolution_attempt_sync(
         self,
         attempt: ResolutionAttempt,
@@ -797,4 +1115,22 @@ class SQLiteTermStore:
             ),
             updated_at=datetime.fromisoformat(row["updated_at"]),
             supersedes_mapping_id=row["supersedes_mapping_id"],
+        )
+
+    @staticmethod
+    def _row_to_home_promotion(
+        row: sqlite3.Row,
+    ) -> HomePromotionRequest:
+        return HomePromotionRequest(
+            revision_id=row["revision_id"],
+            revision=row["revision"],
+            promotion_id=row["promotion_id"],
+            mapping_id=row["mapping_id"],
+            home_id=row["home_id"],
+            person_id=row["person_id"],
+            status=row["status"],
+            source_message_id=row["source_message_id"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            expires_at=datetime.fromisoformat(row["expires_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
         )

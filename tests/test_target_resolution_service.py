@@ -28,6 +28,7 @@ from home_assist_agent.resolution.verifier import ResolutionVerifier
 from home_assist_agent.terms.models import ResolutionAttempt
 from home_assist_agent.terms.models import (
     FeedbackOutcome,
+    HomePromotionOutcome,
     TermLearningOutcome,
 )
 
@@ -296,9 +297,11 @@ class RecordingTermLearning:
         *,
         feedback: FeedbackOutcome | None = None,
         warning: str | None = None,
+        home_outcomes: list[HomePromotionOutcome] | None = None,
     ) -> None:
         self.feedback = feedback or FeedbackOutcome(handled=False)
         self.warning = warning
+        self.home_outcomes = list(home_outcomes or [])
         self.record_calls: list[dict[str, Any]] = []
         self.feedback_calls: list[str] = []
 
@@ -318,6 +321,19 @@ class RecordingTermLearning:
         return TermLearningOutcome(
             warnings=((self.warning,) if self.warning else ()),
         )
+
+    async def confirm_home_promotion(self, **kwargs) -> HomePromotionOutcome:
+        if (
+            self.home_outcomes
+            and not self.home_outcomes[0].requires_confirmation
+        ):
+            return self.home_outcomes.pop(0)
+        return HomePromotionOutcome(handled=False)
+
+    async def request_home_promotion(self, **kwargs) -> HomePromotionOutcome:
+        if self.home_outcomes:
+            return self.home_outcomes.pop(0)
+        return HomePromotionOutcome(handled=False)
 
 
 @pytest.mark.asyncio
@@ -414,6 +430,48 @@ async def test_feedback_is_handled_before_router_and_device_pipeline() -> None:
 
     assert response.status == "success"
     assert response.message == "已撤销刚才学习的个人称呼。"
+    assert router.calls == []
+    assert mcp.calls == []
+
+
+@pytest.mark.asyncio
+async def test_home_sharing_request_and_confirmation_bypass_device_pipeline() -> None:
+    learning = RecordingTermLearning(
+        home_outcomes=[
+            HomePromotionOutcome(
+                handled=True,
+                requires_confirmation=True,
+                message="确认设为全家共享称呼吗？",
+            ),
+            HomePromotionOutcome(
+                handled=True,
+                message="已设为家庭共享称呼。",
+            ),
+        ]
+    )
+    catalog = SequencedCatalog(
+        snapshot(entity("light.bedside", friendly_name="左侧台灯"))
+    )
+    service, mcp, _, _, router = build_service(
+        decision=RouteDecision(category="other"),
+        catalog=catalog,
+        codex=FakeCodex([selected()]),
+        term_learning=learning,
+    )
+
+    request_response = await service.execute(
+        "全家都这么叫",
+        "message-share",
+        actor=ACTOR,
+    )
+    confirm_response = await service.execute(
+        "确认",
+        "message-confirm",
+        actor=ACTOR,
+    )
+
+    assert request_response.status == "needs_input"
+    assert confirm_response.status == "success"
     assert router.calls == []
     assert mcp.calls == []
 
