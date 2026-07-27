@@ -11,6 +11,10 @@ from home_assist_agent.resolution.models import (
     VisibleTermMapping,
 )
 from home_assist_agent.resolution.normalize import normalize_term
+from home_assist_agent.resolution.verifier import (
+    ResolutionError,
+    ResolutionVerifier,
+)
 
 __all__ = [
     "ActorContext",
@@ -19,6 +23,8 @@ __all__ = [
     "ClarificationChoice",
     "DeviceActionIntent",
     "HaEntitySnapshot",
+    "ResolutionError",
+    "ResolutionVerifier",
     "TargetCandidate",
     "TargetResolutionDecision",
     "VerifiedTarget",
