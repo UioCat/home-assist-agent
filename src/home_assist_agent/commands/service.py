@@ -39,7 +39,12 @@ from home_assist_agent.resolution.verifier import (
     ResolutionError,
     ResolutionVerifier,
 )
-from home_assist_agent.terms.models import ResolutionAttempt, TermMapping
+from home_assist_agent.terms.models import (
+    FeedbackOutcome,
+    ResolutionAttempt,
+    TermLearningOutcome,
+    TermMapping,
+)
 
 
 class InstructionRouterProtocol(Protocol):
@@ -103,6 +108,28 @@ class TermStoreProtocol(Protocol):
     ) -> ResolutionAttempt | None: ...
 
 
+class TermLearningProtocol(Protocol):
+    async def record_success(
+        self,
+        *,
+        actor: ActorContext,
+        expression: str,
+        target,
+        execution,
+        source_message_id: str,
+        now: datetime,
+    ) -> TermLearningOutcome: ...
+
+    async def handle_feedback(
+        self,
+        *,
+        actor: ActorContext,
+        text: str,
+        message_id: str,
+        now: datetime,
+    ) -> FeedbackOutcome: ...
+
+
 class CommandOrchestrator:
     def __init__(
         self,
@@ -117,6 +144,7 @@ class CommandOrchestrator:
         audit: AuditRecorderProtocol | None = None,
         target_resolution_enabled: bool = False,
         clock: Callable[[], datetime] | None = None,
+        term_learning: TermLearningProtocol | None = None,
     ) -> None:
         self._router = router
         self._codex = codex
@@ -128,6 +156,7 @@ class CommandOrchestrator:
         self._audit = audit
         self._target_resolution_enabled = target_resolution_enabled
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._term_learning = term_learning
         if target_resolution_enabled and any(
             dependency is None
             for dependency in (
@@ -164,6 +193,36 @@ class CommandOrchestrator:
                     started_at=started_at,
                     error_code="actor_required",
                 )
+            if self._term_learning is not None:
+                try:
+                    feedback = await self._term_learning.handle_feedback(
+                        actor=actor,
+                        text=command,
+                        message_id=message_id,
+                        now=self._clock(),
+                    )
+                except DependencyError as error:
+                    return self._response(
+                        message_id=message_id,
+                        category=CommandCategory.OTHER,
+                        route="codex",
+                        status=CommandStatus.ERROR,
+                        message=error.message,
+                        trace=trace,
+                        started_at=started_at,
+                        error_code=error.code,
+                    )
+                if feedback.handled:
+                    return self._response(
+                        message_id=message_id,
+                        category=CommandCategory.OTHER,
+                        route="codex",
+                        status=CommandStatus.SUCCESS,
+                        message=feedback.message or "已处理术语纠正。",
+                        trace=trace,
+                        started_at=started_at,
+                        warnings=list(feedback.warnings),
+                    )
             clarification = await self._match_clarification(
                 command,
                 message_id,
@@ -393,6 +452,7 @@ class CommandOrchestrator:
                 decision=decision,
                 intent=intent,
                 verified=verified,
+                actor=actor,
                 message_id=message_id,
                 trace=trace,
                 started_at=started_at,
@@ -409,6 +469,7 @@ class CommandOrchestrator:
         decision: RouteDecision,
         intent: DeviceActionIntent,
         verified,
+        actor: ActorContext,
         message_id: str,
         trace: list[TraceStep],
         started_at: float,
@@ -508,6 +569,20 @@ class CommandOrchestrator:
                 tool_calls=list(batch.tool_calls),
                 error_code="partial_device_execution",
             )
+        warnings: list[str] = []
+        if self._term_learning is not None:
+            try:
+                learning = await self._term_learning.record_success(
+                    actor=actor,
+                    expression=intent.target_expression,
+                    target=verified,
+                    execution=batch,
+                    source_message_id=message_id,
+                    now=self._clock(),
+                )
+                warnings.extend(learning.warnings)
+            except DependencyError:
+                warnings.append("term_learning_unavailable")
         trace.extend(
             [
                 TraceStep(
@@ -535,6 +610,7 @@ class CommandOrchestrator:
                 status=ResolutionStatus.SELECTED,
                 confidence=1,
             ),
+            warnings=warnings,
         )
 
     async def _clarification_response(
@@ -731,6 +807,7 @@ class CommandOrchestrator:
             decision=route_decision,
             intent=intent,
             verified=verified,
+            actor=actor,
             message_id=message_id,
             trace=trace,
             started_at=started_at,

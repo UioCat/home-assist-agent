@@ -253,6 +253,17 @@ class SQLiteTermStore:
             ),
         )
 
+    async def latest_active_provisional(
+        self,
+        actor: ActorContext,
+        now: datetime,
+    ) -> TermMapping | None:
+        return await asyncio.to_thread(
+            self._latest_active_provisional_sync,
+            actor,
+            now,
+        )
+
     async def save_resolution_attempt(
         self,
         attempt: ResolutionAttempt,
@@ -633,6 +644,35 @@ class SQLiteTermStore:
                 (home_id, person_id),
             ).fetchall()
         return [self._row_to_mapping(row) for row in rows]
+
+    def _latest_active_provisional_sync(
+        self,
+        actor: ActorContext,
+        now: datetime,
+    ) -> TermMapping | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT current.*
+                FROM term_mapping_revisions AS current
+                JOIN (
+                    SELECT mapping_id, MAX(revision) AS revision
+                    FROM term_mapping_revisions
+                    GROUP BY mapping_id
+                ) AS latest
+                  ON latest.mapping_id = current.mapping_id
+                 AND latest.revision = current.revision
+                WHERE current.home_id = ?
+                  AND current.scope = 'person'
+                  AND current.person_id = ?
+                  AND current.status = 'provisional'
+                  AND current.promote_at > ?
+                ORDER BY current.updated_at DESC, current.mapping_id DESC
+                LIMIT 1
+                """,
+                (actor.home_id, actor.person_id, now.isoformat()),
+            ).fetchone()
+        return self._row_to_mapping(row) if row is not None else None
 
     def _revision_count_sync(self, mapping_id: str) -> int:
         with self._connect() as connection:

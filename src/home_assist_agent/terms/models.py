@@ -124,3 +124,18 @@ class HomePromotionRequest(ImmutableModel):
         if self.expires_at <= self.created_at:
             raise ValueError("promotion request must expire after creation")
         return self
+
+
+class TermLearningOutcome(ImmutableModel):
+    learned: bool = False
+    mapping: TermMapping | None = None
+    prompt_user: bool = False
+    warnings: tuple[str, ...] = ()
+
+
+class FeedbackOutcome(ImmutableModel):
+    handled: bool
+    message: str | None = None
+    mapping: TermMapping | None = None
+    replacement_expression: str | None = None
+    warnings: tuple[str, ...] = ()

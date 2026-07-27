@@ -26,6 +26,10 @@ from home_assist_agent.resolution.models import (
 )
 from home_assist_agent.resolution.verifier import ResolutionVerifier
 from home_assist_agent.terms.models import ResolutionAttempt
+from home_assist_agent.terms.models import (
+    FeedbackOutcome,
+    TermLearningOutcome,
+)
 
 
 NOW = datetime(2026, 7, 28, 10, 0, tzinfo=UTC)
@@ -254,6 +258,7 @@ def build_service(
     catalog: SequencedCatalog,
     codex: FakeCodex,
     terms: FakeTerms | None = None,
+    term_learning=None,
 ) -> tuple[
     CommandOrchestrator,
     RecordingMcp,
@@ -280,8 +285,39 @@ def build_service(
         audit=audit,
         target_resolution_enabled=True,
         clock=lambda: NOW,
+        term_learning=term_learning,
     )
     return service, mcp, audit, active_terms, router
+
+
+class RecordingTermLearning:
+    def __init__(
+        self,
+        *,
+        feedback: FeedbackOutcome | None = None,
+        warning: str | None = None,
+    ) -> None:
+        self.feedback = feedback or FeedbackOutcome(handled=False)
+        self.warning = warning
+        self.record_calls: list[dict[str, Any]] = []
+        self.feedback_calls: list[str] = []
+
+    async def handle_feedback(
+        self,
+        *,
+        actor: ActorContext,
+        text: str,
+        message_id: str,
+        now: datetime,
+    ) -> FeedbackOutcome:
+        self.feedback_calls.append(text)
+        return self.feedback
+
+    async def record_success(self, **kwargs) -> TermLearningOutcome:
+        self.record_calls.append(kwargs)
+        return TermLearningOutcome(
+            warnings=((self.warning,) if self.warning else ()),
+        )
 
 
 @pytest.mark.asyncio
@@ -317,6 +353,69 @@ async def test_open_bedside_light_resolves_before_execution() -> None:
         event.event_type == "target.candidates_generated"
         for event in audit.events
     )
+
+
+@pytest.mark.asyncio
+async def test_full_success_hands_off_learning_once_without_reexecution() -> None:
+    catalog = SequencedCatalog(
+        snapshot(entity("light.bedside", friendly_name="左侧台灯")),
+        snapshot(entity("light.bedside", friendly_name="左侧台灯")),
+    )
+    learning = RecordingTermLearning(warning="term_learning_unavailable")
+    service, mcp, _, _, _ = build_service(
+        decision=RouteDecision(
+            category="direct_iot",
+            device_command=DeviceCommand(
+                action="turn_on",
+                target_expression="床头灯",
+            ),
+        ),
+        catalog=catalog,
+        codex=FakeCodex([selected()]),
+        term_learning=learning,
+    )
+
+    response = await service.execute(
+        "打开床头灯",
+        "message-learning",
+        actor=ACTOR,
+    )
+
+    assert response.status == "success"
+    assert response.warnings == ["term_learning_unavailable"]
+    assert len(learning.record_calls) == 1
+    assert learning.record_calls[0]["expression"] == "床头灯"
+    assert len(mcp.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_feedback_is_handled_before_router_and_device_pipeline() -> None:
+    learning = RecordingTermLearning(
+        feedback=FeedbackOutcome(
+            handled=True,
+            message="已撤销刚才学习的个人称呼。",
+        )
+    )
+    catalog = SequencedCatalog(
+        snapshot(entity("light.bedside", friendly_name="左侧台灯"))
+    )
+    service, mcp, _, _, router = build_service(
+        decision=RouteDecision(category="other"),
+        catalog=catalog,
+        codex=FakeCodex([selected()]),
+        term_learning=learning,
+    )
+
+    response = await service.execute(
+        "不是这个",
+        "message-feedback",
+        actor=ACTOR,
+    )
+
+    assert response.status == "success"
+    assert response.message == "已撤销刚才学习的个人称呼。"
+    assert router.calls == []
+    assert mcp.calls == []
 
 
 def json_arguments(calls: list[tuple[str, dict[str, object], str]]) -> str:
