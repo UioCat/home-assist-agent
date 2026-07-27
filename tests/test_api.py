@@ -174,6 +174,8 @@ def test_command_response_forces_request_id_to_match_message_id() -> None:
         {"command": "你好", "reasoning": "ultra"},
         {"command": "你好", "message_id": " "},
         {"command": "你好", "message_id": "a" * 129},
+        {"command": "你好", "person_id": "forged-person"},
+        {"command": "你好", "home_id": "other-home"},
     ],
 )
 def test_invalid_command_requests_are_rejected_before_dispatch(

@@ -1,11 +1,13 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from home_assist_agent.commands.models import ReasoningLevel
 
 
 class CommandRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     command: str = Field(min_length=1, max_length=1000)
     reasoning: ReasoningLevel = "medium"
     message_id: str | None = Field(default=None, min_length=1, max_length=128)

@@ -299,6 +299,17 @@ class SQLiteTermStore:
             now,
         )
 
+    async def load_latest_resolution_attempt(
+        self,
+        actor: ActorContext,
+        now: datetime,
+    ) -> ResolutionAttempt | None:
+        return await asyncio.to_thread(
+            self._load_latest_resolution_attempt_sync,
+            actor,
+            now,
+        )
+
     async def resolution_attempt_count(self, attempt_id: str) -> int:
         return await asyncio.to_thread(
             self._resolution_attempt_count_sync,
@@ -679,6 +690,28 @@ class SQLiteTermStore:
                     actor.person_id,
                     now.isoformat(),
                 ),
+            ).fetchone()
+        if row is None:
+            return None
+        return ResolutionAttempt.model_validate_json(row["payload_json"])
+
+    def _load_latest_resolution_attempt_sync(
+        self,
+        actor: ActorContext,
+        now: datetime,
+    ) -> ResolutionAttempt | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT payload_json
+                FROM resolution_attempts
+                WHERE home_id = ?
+                  AND person_id = ?
+                  AND expires_at > ?
+                ORDER BY rowid DESC
+                LIMIT 1
+                """,
+                (actor.home_id, actor.person_id, now.isoformat()),
             ).fetchone()
         if row is None:
             return None

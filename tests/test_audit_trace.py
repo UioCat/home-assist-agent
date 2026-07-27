@@ -126,7 +126,8 @@ async def test_one_message_id_links_route_plan_and_external_exchanges(
                 (
                     '{"category":"indirect_iot","device_command":null,'
                     '"intent_summary":"调暗客厅灯",'
-                    '"target_expression":"客厅灯"}'
+                    '"target_expression":"客厅灯",'
+                    '"indirect_action":"set_brightness"}'
                 ),
                 (
                     '{"message":"准备调暗客厅灯。","tool_plan":{'

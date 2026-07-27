@@ -4,6 +4,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from home_assist_agent.resolution.models import (
+    ClarificationChoice,
+    ResolutionStatus,
+)
+
 
 class CommandCategory(StrEnum):
     DIRECT_IOT = "direct_iot"
@@ -13,6 +18,7 @@ class CommandCategory(StrEnum):
 
 class CommandStatus(StrEnum):
     SUCCESS = "success"
+    NEEDS_INPUT = "needs_input"
     BLOCKED = "blocked"
     ERROR = "error"
 
@@ -128,6 +134,11 @@ class RouteDecision(BaseModel):
     device_command: DeviceCommand | None = None
     intent_summary: str | None = None
     target_expression: str | None = None
+    indirect_action: Literal[
+        "turn_on",
+        "turn_off",
+        "set_brightness",
+    ] | None = None
 
     @model_validator(mode="after")
     def validate_category_payload(self) -> "RouteDecision":
@@ -142,6 +153,8 @@ class RouteDecision(BaseModel):
                 raise ValueError("indirect_iot requires intent_summary")
             if not self.target_expression or not self.target_expression.strip():
                 raise ValueError("indirect_iot requires target_expression")
+            if self.indirect_action is None:
+                raise ValueError("indirect_iot requires indirect_action")
         elif self.intent_summary is not None:
             raise ValueError("intent_summary is only valid for indirect_iot")
         if (
@@ -150,6 +163,13 @@ class RouteDecision(BaseModel):
         ):
             raise ValueError(
                 "top-level target_expression is only valid for indirect_iot"
+            )
+        if (
+            self.category != CommandCategory.INDIRECT_IOT
+            and self.indirect_action is not None
+        ):
+            raise ValueError(
+                "indirect_action is only valid for indirect_iot"
             )
         return self
 
@@ -207,6 +227,13 @@ class TraceStep(BaseModel):
     summary: str
 
 
+class ResolutionDetails(BaseModel):
+    status: ResolutionStatus
+    confidence: float = Field(ge=0, le=1)
+    choices: list[ClarificationChoice] = Field(default_factory=list, max_length=3)
+    attempt_id: str | None = None
+
+
 class CommandResponse(BaseModel):
     message_id: str
     request_id: str
@@ -216,6 +243,8 @@ class CommandResponse(BaseModel):
     message: str
     tool_call: ToolCallRecord | None = None
     tool_calls: list[ToolCallRecord] = Field(default_factory=list)
+    resolution: ResolutionDetails | None = None
+    warnings: list[str] = Field(default_factory=list)
     trace: list[TraceStep] = Field(default_factory=list)
     elapsed_ms: int = 0
     error_code: str | None = None

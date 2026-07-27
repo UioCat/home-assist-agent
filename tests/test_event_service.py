@@ -15,6 +15,7 @@ from home_assist_agent.events.models import (
 )
 from home_assist_agent.events.service import EventService
 from home_assist_agent.events.store import SQLiteEventReceiptStore
+from home_assist_agent.resolution.models import ActorContext
 
 
 def make_event(**overrides) -> EventRequest:
@@ -34,7 +35,9 @@ def make_event(**overrides) -> EventRequest:
 
 @dataclass
 class FakeCommands:
-    calls: list[tuple[str, str, str | None, str | None]] = field(default_factory=list)
+    calls: list[
+        tuple[str, str, str | None, str | None, ActorContext | None]
+    ] = field(default_factory=list)
 
     async def execute(
         self,
@@ -42,8 +45,11 @@ class FakeCommands:
         message_id: str,
         correlation_id: str | None = None,
         causation_id: str | None = None,
+        actor: ActorContext | None = None,
     ) -> CommandResponse:
-        self.calls.append((command, message_id, correlation_id, causation_id))
+        self.calls.append(
+            (command, message_id, correlation_id, causation_id, actor)
+        )
         return CommandResponse(
             message_id=message_id,
             request_id=message_id,
@@ -82,6 +88,7 @@ def build_event_service(
         rules=rules or NoopAutomationRuleEngine(),
         commands=commands,
         audit=audit,
+        actor=ActorContext(home_id="home-1", person_id="system"),
     )
 
 
@@ -167,6 +174,7 @@ async def test_matching_rule_reuses_event_message_id_for_derived_command(
             event.message_id,
             event.message_id,
             event.message_id,
+            ActorContext(home_id="home-1", person_id="system"),
         )
     ]
     assert any(item.event_type == "automation.matched" for item in events)
@@ -196,5 +204,6 @@ async def test_derived_command_uses_rule_causation_not_parent_event_causation(
             event.message_id,
             "home-session-456",
             event.message_id,
+            ActorContext(home_id="home-1", person_id="system"),
         )
     ]

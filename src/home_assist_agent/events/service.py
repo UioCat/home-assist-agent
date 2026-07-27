@@ -8,6 +8,7 @@ from home_assist_agent.events.models import (
     EventResponse,
     HouseholdContextEntry,
 )
+from home_assist_agent.resolution.models import ActorContext
 
 
 class EventReceiptStoreProtocol(Protocol):
@@ -50,6 +51,7 @@ class CommandOrchestratorProtocol(Protocol):
         message_id: str,
         correlation_id: str | None = None,
         causation_id: str | None = None,
+        actor: ActorContext | None = None,
     ) -> CommandResponse: ...
 
 
@@ -62,12 +64,14 @@ class EventService:
         rules: AutomationRuleEngineProtocol,
         commands: CommandOrchestratorProtocol,
         audit: AuditRecorderProtocol,
+        actor: ActorContext | None = None,
     ) -> None:
         self._receipts = receipts
         self._context = context
         self._rules = rules
         self._commands = commands
         self._audit = audit
+        self._actor = actor
 
     async def handle(self, event: EventRequest) -> EventResponse:
         message_id = event.message_id
@@ -153,6 +157,7 @@ class EventService:
                     message_id,
                     derived_correlation_id,
                     derived_causation_id,
+                    actor=self._actor,
                 )
                 response = EventResponse(
                     message_id=message_id,

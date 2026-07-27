@@ -374,14 +374,16 @@ class CodexGateway:
                 "direct_iot 表示动作、目标和参数都明确；必须返回 device_command。",
                 "device_command.action 只能是 turn_on、turn_off、set_brightness。",
                 "direct_iot 的原始目标称呼写入 "
-                "device_command.target_expression，顶层 target_expression 为 null。",
+                "device_command.target_expression，顶层 target_expression 和 "
+                "indirect_action 为 null。",
                 "device_command.parameters_json 必须是 JSON 对象字符串；"
                 "set_brightness 必须包含 0 到 100 的整数 brightness。",
                 "indirect_iot 表示需要结合设备能力或环境状态推理；"
                 "必须返回简洁 intent_summary，并把原始目标称呼写入顶层 "
-                "target_expression。",
+                "target_expression；indirect_action 必须是 turn_on、turn_off "
+                "或 set_brightness。",
                 "other 表示不需要控制家庭设备；device_command 和 "
-                "intent_summary、target_expression 都必须为 null。",
+                "intent_summary、target_expression、indirect_action 都必须为 null。",
                 "用户输入：",
                 json.dumps(command, ensure_ascii=False),
             ]

@@ -3,6 +3,7 @@ from uuid import uuid4
 
 from home_assist_agent.audit.recorder import AuditRecorderProtocol
 from home_assist_agent.commands.models import CommandResponse, ReasoningLevel
+from home_assist_agent.resolution.models import ActorContext
 
 
 class CommandOrchestratorProtocol(Protocol):
@@ -12,6 +13,7 @@ class CommandOrchestratorProtocol(Protocol):
         message_id: str,
         correlation_id: str | None = None,
         causation_id: str | None = None,
+        actor: ActorContext | None = None,
     ) -> CommandResponse: ...
 
 
@@ -21,10 +23,12 @@ class MessageChannel:
         orchestrator: CommandOrchestratorProtocol,
         audit: AuditRecorderProtocol,
         service: str = "web",
+        actor: ActorContext | None = None,
     ) -> None:
         self._orchestrator = orchestrator
         self._audit = audit
         self._service = service
+        self._actor = actor
 
     async def execute(
         self,
@@ -42,6 +46,7 @@ class MessageChannel:
                 "reasoning": reasoning,
                 "reasoning_policy": {
                     "route": "low",
+                    "target_resolution": "medium",
                     "device_plan": "medium",
                     "answer": "high",
                 },
@@ -54,6 +59,7 @@ class MessageChannel:
                 active_message_id,
                 active_message_id,
                 None,
+                actor=self._actor,
             )
         except Exception as error:
             await self._audit.record(

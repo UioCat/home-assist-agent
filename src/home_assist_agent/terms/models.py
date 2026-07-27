@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -70,9 +70,15 @@ class ResolutionAttempt(ImmutableModel):
     source_message_id: str = Field(min_length=1)
     home_id: str = Field(min_length=1)
     person_id: str = Field(min_length=1)
+    original_command: str = Field(min_length=1, max_length=1000)
+    category: Literal["direct_iot", "indirect_iot"]
+    action: Literal["turn_on", "turn_off", "set_brightness"]
     target_expression: str = Field(min_length=1, max_length=200)
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    intent_summary: str | None = None
     candidates: tuple[TargetCandidate, ...]
     choices: tuple[ClarificationChoice, ...] = Field(max_length=3)
+    choice_candidate_ids: tuple[str, ...] = Field(default=(), max_length=3)
     created_at: datetime
     expires_at: datetime
 
@@ -83,6 +89,13 @@ class ResolutionAttempt(ImmutableModel):
         candidate_ids = {item.candidate_id for item in self.candidates}
         if len(candidate_ids) != len(self.candidates):
             raise ValueError("candidate IDs must be unique")
+        if len(self.choice_candidate_ids) != len(self.choices):
+            raise ValueError("every choice requires one candidate ID")
+        if any(
+            candidate_id not in candidate_ids
+            for candidate_id in self.choice_candidate_ids
+        ):
+            raise ValueError("choice references unknown candidate")
         return self
 
 

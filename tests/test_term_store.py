@@ -234,6 +234,9 @@ async def test_resolution_attempt_expires_without_deleting_history(
         source_message_id="message-1",
         home_id="home-1",
         person_id="person-1",
+        original_command="打开床头灯",
+        category="direct_iot",
+        action="turn_on",
         target_expression="床头灯",
         candidates=(candidate(),),
         choices=(
@@ -244,6 +247,7 @@ async def test_resolution_attempt_expires_without_deleting_history(
                 domain="light",
             ),
         ),
+        choice_candidate_ids=("cand_01",),
         created_at=NOW,
         expires_at=NOW_PLUS_10,
     )

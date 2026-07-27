@@ -23,13 +23,13 @@ class DeviceActionIntent(ImmutableModel):
     def validate_parameters(self) -> "DeviceActionIntent":
         brightness = self.parameters.get("brightness")
         if self.action == "set_brightness":
-            if (
+            if brightness is not None and (
                 isinstance(brightness, bool)
                 or not isinstance(brightness, int)
                 or not 0 <= brightness <= 100
             ):
                 raise ValueError(
-                    "set_brightness requires integer brightness from 0 to 100"
+                    "brightness must be an integer from 0 to 100"
                 )
         elif brightness is not None:
             raise ValueError("brightness is only valid for set_brightness")

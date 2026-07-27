@@ -62,12 +62,28 @@
           "type": "null"
         }
       ]
+    },
+    "indirect_action": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "turn_on",
+            "turn_off",
+            "set_brightness"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "required": [
     "category",
     "device_command",
     "intent_summary",
-    "target_expression"
+    "target_expression",
+    "indirect_action"
   ]
 }
