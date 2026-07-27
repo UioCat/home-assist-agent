@@ -25,7 +25,7 @@
                 "set_brightness"
               ]
             },
-            "target": {
+            "target_expression": {
               "type": "string"
             },
             "parameters_json": {
@@ -34,7 +34,7 @@
           },
           "required": [
             "action",
-            "target",
+            "target_expression",
             "parameters_json"
           ]
         },
@@ -52,11 +52,22 @@
           "type": "null"
         }
       ]
+    },
+    "target_expression": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "required": [
     "category",
     "device_command",
-    "intent_summary"
+    "intent_summary",
+    "target_expression"
   ]
 }

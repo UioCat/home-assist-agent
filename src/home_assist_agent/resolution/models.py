@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ImmutableModel(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
 
 class ActorContext(ImmutableModel):
@@ -165,8 +165,24 @@ class TargetResolutionDecision(ImmutableModel):
         if self.status == ResolutionStatus.SELECTED:
             if not self.selected_candidate_id:
                 raise ValueError("selected decision requires a candidate")
+            if self.selected_candidate_id in self.alternative_candidate_ids:
+                raise ValueError("selected candidate cannot also be an alternative")
+        elif self.status == ResolutionStatus.AMBIGUOUS:
+            if self.selected_candidate_id is not None:
+                raise ValueError("ambiguous decision cannot select a candidate")
+            if len(self.alternative_candidate_ids) < 2:
+                raise ValueError("ambiguous decision requires at least two alternatives")
         elif self.selected_candidate_id is not None:
             raise ValueError("non-selected decision cannot select a candidate")
+        if (
+            self.status == ResolutionStatus.NO_MATCH
+            and self.alternative_candidate_ids
+        ):
+            raise ValueError("no-match decision cannot include alternatives")
+        if len(set(self.alternative_candidate_ids)) != len(
+            self.alternative_candidate_ids
+        ):
+            raise ValueError("alternative candidate IDs must be unique")
         return self
 
 

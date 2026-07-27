@@ -8,6 +8,7 @@ from home_assist_agent.commands.models import (
     CommandStatus,
     DevicePlanResult,
     RouteDecision,
+    ToolPlan,
     ToolCallRecord,
     ToolDefinition,
     TraceStep,
@@ -245,8 +246,14 @@ class CommandOrchestrator:
             )
         )
         try:
+            compatibility_arguments = dict(plan_result.tool_plan.arguments)
+            compatibility_arguments["name"] = decision.target_expression
+            compatibility_plan = ToolPlan(
+                tool_name=plan_result.tool_plan.tool_name,
+                arguments=compatibility_arguments,
+            )
             tool_call = await self._devices.execute_plan(
-                plan_result.tool_plan,
+                compatibility_plan,
                 tools,
                 message_id,
                 correlation_id,

@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "selected",
+        "ambiguous",
+        "no_match"
+      ]
+    },
+    "selected_candidate_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^cand_[0-9]{2}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "alternative_candidate_ids": {
+      "type": "array",
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^cand_[0-9]{2}$"
+      }
+    },
+    "reason": {
+      "type": "string",
+      "maxLength": 500
+    }
+  },
+  "required": [
+    "status",
+    "selected_candidate_id",
+    "confidence",
+    "alternative_candidate_ids",
+    "reason"
+  ]
+}

@@ -60,18 +60,24 @@ class ToolPlan(BaseModel):
 
 class DeviceCommand(BaseModel):
     action: Literal["turn_on", "turn_off", "set_brightness"]
-    target: str = Field(min_length=1, max_length=200)
+    target_expression: str = Field(min_length=1, max_length=200)
     parameters_json: str = "{}"
 
     @model_validator(mode="before")
     @classmethod
     def encode_internal_parameters(cls, value: Any) -> Any:
-        if (
-            isinstance(value, dict)
-            and "parameters" in value
-            and "parameters_json" not in value
-        ):
+        if isinstance(value, dict):
             normalized = dict(value)
+            if (
+                "target" in normalized
+                and "target_expression" not in normalized
+            ):
+                normalized["target_expression"] = normalized.pop("target")
+            if (
+                "parameters" not in normalized
+                or "parameters_json" in normalized
+            ):
+                return normalized
             parameters = normalized.pop("parameters")
             normalized["parameters_json"] = json.dumps(
                 parameters,
@@ -112,11 +118,16 @@ class DeviceCommand(BaseModel):
     def parameters(self) -> dict[str, Any]:
         return json.loads(self.parameters_json)
 
+    @property
+    def target(self) -> str:
+        return self.target_expression
+
 
 class RouteDecision(BaseModel):
     category: CommandCategory
     device_command: DeviceCommand | None = None
     intent_summary: str | None = None
+    target_expression: str | None = None
 
     @model_validator(mode="after")
     def validate_category_payload(self) -> "RouteDecision":
@@ -129,8 +140,17 @@ class RouteDecision(BaseModel):
         if self.category == CommandCategory.INDIRECT_IOT:
             if not self.intent_summary or not self.intent_summary.strip():
                 raise ValueError("indirect_iot requires intent_summary")
+            if not self.target_expression or not self.target_expression.strip():
+                raise ValueError("indirect_iot requires target_expression")
         elif self.intent_summary is not None:
             raise ValueError("intent_summary is only valid for indirect_iot")
+        if (
+            self.category != CommandCategory.INDIRECT_IOT
+            and self.target_expression is not None
+        ):
+            raise ValueError(
+                "top-level target_expression is only valid for indirect_iot"
+            )
         return self
 
 

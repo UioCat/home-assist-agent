@@ -199,6 +199,7 @@ async def test_indirect_command_plans_then_executes_one_safe_tool() -> None:
     decision = RouteDecision(
         category="indirect_iot",
         intent_summary="调暗客厅灯",
+        target_expression="客厅灯",
     )
     codex = FakeCodexService(
         plan_result=DevicePlanResult(
@@ -262,6 +263,7 @@ async def test_unsafe_device_plan_is_blocked_before_mcp_call() -> None:
     decision = RouteDecision(
         category="indirect_iot",
         intent_summary="关闭前门锁",
+        target_expression="前门锁",
     )
     codex = FakeCodexService(
         plan_result=DevicePlanResult(
@@ -288,6 +290,7 @@ async def test_indirect_command_reports_ha_error_before_planning() -> None:
     decision = RouteDecision(
         category="indirect_iot",
         intent_summary="调亮客厅",
+        target_expression="客厅",
     )
     codex = FakeCodexService()
     ha = FakeHaMcpClient(
@@ -334,6 +337,7 @@ async def test_tool_arguments_must_match_live_mcp_schema() -> None:
     decision = RouteDecision(
         category="indirect_iot",
         intent_summary="调暗客厅灯",
+        target_expression="客厅灯",
     )
     codex = FakeCodexService(
         plan_result=DevicePlanResult(

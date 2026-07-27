@@ -123,16 +123,16 @@ async def test_one_message_id_links_route_plan_and_external_exchanges(
     recorder = SQLiteAuditRecorder(tmp_path / "audit.db")
     runner = AuditRunner(
         outputs=[
-            (
-                '{"category":"indirect_iot","device_command":null,'
-                '"intent_summary":"调暗客厅灯"}'
-            ),
-            (
-                '{"message":"准备调暗客厅灯。","tool_plan":{'
-                '"tool_name":"HassLightSet",'
-                '"arguments_json":"{\\"name\\":\\"客厅灯\\",'
-                '\\"brightness\\":30}"}}'
-            ),
+                (
+                    '{"category":"indirect_iot","device_command":null,'
+                    '"intent_summary":"调暗客厅灯",'
+                    '"target_expression":"客厅灯"}'
+                ),
+                (
+                    '{"message":"准备调暗客厅灯。","tool_plan":{'
+                    '"tool_name":"HassLightSet",'
+                    '"arguments_json":"{\\"brightness\\":30}"}}'
+                ),
         ]
     )
     channel = build_message_channel(recorder, runner)

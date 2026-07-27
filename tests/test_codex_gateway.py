@@ -111,8 +111,7 @@ async def test_device_plan_uses_medium_reasoning_and_safe_tools() -> None:
         output=(
             '{"message":"准备调暗客厅灯。","tool_plan":{'
             '"tool_name":"HassLightSet",'
-            '"arguments_json":"{\\"name\\":\\"客厅灯\\",'
-            '\\"brightness\\":30}"}}'
+            '"arguments_json":"{\\"brightness\\":30}"}}'
         )
     )
     gateway = CodexGateway(runner=runner, audit=audit)
@@ -126,10 +125,7 @@ async def test_device_plan_uses_medium_reasoning_and_safe_tools() -> None:
     )
 
     call = runner.calls[0]
-    assert result.tool_plan.arguments == {
-        "name": "客厅灯",
-        "brightness": 30,
-    }
+    assert result.tool_plan.arguments == {"brightness": 30}
     assert "model_reasoning_effort=medium" in call["args"]
     assert call["timeout_seconds"] == 90
     assert command not in call["args"]
