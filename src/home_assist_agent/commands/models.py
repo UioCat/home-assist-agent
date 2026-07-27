@@ -180,6 +180,27 @@ class ToolCallRecord(BaseModel):
     result: str
 
 
+class DeviceExecutionFailure(BaseModel):
+    entity_id: str
+    error_code: str
+    message: str
+
+
+class DeviceExecutionBatch(BaseModel):
+    completed: tuple[str, ...] = ()
+    failed: tuple[DeviceExecutionFailure, ...] = ()
+    skipped: tuple[str, ...] = ()
+    tool_calls: tuple[ToolCallRecord, ...] = ()
+
+    @property
+    def fully_succeeded(self) -> bool:
+        return bool(self.completed) and not self.failed and not self.skipped
+
+    @property
+    def learning_eligible(self) -> bool:
+        return self.fully_succeeded
+
+
 class TraceStep(BaseModel):
     stage: str
     status: CommandStatus
@@ -194,6 +215,7 @@ class CommandResponse(BaseModel):
     status: CommandStatus
     message: str
     tool_call: ToolCallRecord | None = None
+    tool_calls: list[ToolCallRecord] = Field(default_factory=list)
     trace: list[TraceStep] = Field(default_factory=list)
     elapsed_ms: int = 0
     error_code: str | None = None
@@ -208,4 +230,13 @@ class CommandResponse(BaseModel):
         if message_id is not None:
             normalized["message_id"] = message_id
             normalized["request_id"] = message_id
+        tool_call = normalized.get("tool_call")
+        tool_calls = normalized.get("tool_calls")
+        if tool_call is not None and not tool_calls:
+            normalized["tool_calls"] = [tool_call]
+        elif isinstance(tool_calls, (list, tuple)):
+            if len(tool_calls) == 1 and tool_call is None:
+                normalized["tool_call"] = tool_calls[0]
+            elif len(tool_calls) != 1:
+                normalized["tool_call"] = None
         return normalized
