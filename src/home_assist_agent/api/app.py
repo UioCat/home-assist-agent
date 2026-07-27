@@ -1,5 +1,6 @@
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Protocol
+from typing import AsyncIterator, Protocol
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
@@ -29,14 +30,36 @@ class EventServiceProtocol(Protocol):
     async def handle(self, event: EventRequest) -> EventResponse: ...
 
 
+class PromotionWorkerProtocol(Protocol):
+    async def start(self) -> None: ...
+
+    async def stop(self) -> None: ...
+
+
 def create_app(
     command_service: CommandServiceProtocol,
     health_service: HealthServiceProtocol,
     audit_query: AuditQueryProtocol,
     event_service: EventServiceProtocol | None = None,
     frontend_dist: Path | None = None,
+    promotion_worker: PromotionWorkerProtocol | None = None,
 ) -> FastAPI:
-    app = FastAPI(title="Home Assist Agent", version="0.1.0")
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        if promotion_worker is not None:
+            await promotion_worker.start()
+        try:
+            yield
+        finally:
+            if promotion_worker is not None:
+                await promotion_worker.stop()
+
+    app = FastAPI(
+        title="Home Assist Agent",
+        version="0.1.0",
+        lifespan=lifespan,
+    )
+    app.state.term_promotion_worker = promotion_worker
 
     @app.post("/api/commands", response_model=CommandResponse)
     async def execute_command(request: CommandRequest) -> CommandResponse:

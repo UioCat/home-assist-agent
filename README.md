@@ -10,13 +10,15 @@
 
 - React 单页工作台：输入指令，查看固定路由策略、依赖状态和执行轨迹。
 - Python/FastAPI 后端：统一提供指令与健康接口，并直接托管 React 生产构建。
-- 三类分发：Codex 以 `low` 判断直接控制、模糊控制或普通请求；模糊控制由 `medium` 规划设备工具；普通请求由 `high` 回答。
+- 三类分发：Codex 以 `low` 判断直接控制、模糊控制或普通请求；设备目标由确定性候选集与 Codex `medium` 排序解析；模糊控制再由 `medium` 规划非目标参数；普通请求由 `high` 回答。
+- 确定性目标解析：从 HA 实时状态和实体、设备、区域注册表读取稳定 `entity_id`，合并当前用户术语后生成最多 20 个候选；Codex 只能选择候选编号，执行前会重新读取目录并确定性校验。
+- 个人术语学习：整个实体集合执行成功后默认静默创建个人 `provisional` 术语，10 分钟无纠正自动批准；“不是这个”可撤销，“全家都这么叫”必须再确认后才共享。
 - Home Assistant MCP：设备控制分支执行前读取实时工具定义，工具名和参数都经过安全策略与 JSON Schema 校验。
 - 本地 Codex 封装：使用只读、无审批、临时会话运行，并隔离用户全局 Codex 配置。
 - 事件入口：接收人员进入、就座等外部事件，按来源事件 ID 去重并更新家庭上下文；默认无规则时不调用 Codex 或 HA。
 - SQLite 追加式审计：使用同一个 `message_id` 串联用户、事件、Codex 和 Home Assistant MCP 的完整请求与响应，并通过 `correlation_id` / `causation_id` 关联场景与因果链。
 
-当前 MVP 仅允许开、关、灯光设置和实时上下文类工具，并阻止门锁、车库门、燃气、供水和摄像头等高风险目标。一次请求最多执行一个 MCP 工具。
+当前 MVP 仅允许开、关、灯光设置和实时上下文类工具，并继续使用现有兼容安全策略。一个已验证候选最多包含 20 个实体；集合按 `entity_id` 稳定顺序逐项执行，首个失败后停止，且部分成功不会学习术语。
 
 ### 前置条件
 
@@ -33,7 +35,7 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev]'
 
 cp .env.example .env
-# 编辑 .env，至少填写 HA_MCP_URL 和 HA_TOKEN
+# 编辑 .env，至少填写 HA_BASE_URL、HA_MCP_URL 和 HA_TOKEN
 
 cd frontend
 npm install
@@ -51,8 +53,8 @@ cd ..
 
 | 类型 | 示例 | 处理路径 |
 | --- | --- | --- |
-| 直接 IoT | `打开客厅灯`、`把客厅灯调到 30%` | Codex `low` 路由并输出设备指令 → HA MCP |
-| 间接 IoT | `客厅太暗了` | Codex `low` 路由 → HA 实时安全工具 → Codex `medium` 设备规划 → HA MCP |
+| 直接 IoT | `打开客厅灯`、`把客厅灯调到 30%` | Codex `low` 路由 → HA 目录与个人术语生成候选 → Codex `medium` 只选候选 → 刷新校验 → HA MCP |
+| 间接 IoT | `客厅太暗了` | Codex `low` 路由 → 候选解析与刷新校验 → Codex `medium` 只规划非目标参数 → HA MCP |
 | 其余指令 | `介绍一下你能做什么` | Codex `low` 路由 → Codex `high` 普通回答；不访问 HA |
 
 主要接口：
@@ -64,6 +66,21 @@ cd ..
 - `GET /api/audit/{message_id}`：按事件顺序查询一条消息的完整审计链路
 
 `POST /api/commands` 可选传入不超过 128 个字符的 `message_id`；未传入时由后端生成。响应中的 `message_id` 和兼容字段 `request_id` 使用同一个值。审计事件默认写入 `data/audit.db`，可通过 `AUDIT_DB_PATH` 修改。
+
+目标解析默认启用，可通过以下配置调整：
+
+```text
+HA_BASE_URL=http://homeassistant.local:8123
+HOME_ID=local-home
+PERSON_ID=local-user
+TARGET_RESOLUTION_ENABLED=true
+TARGET_RESOLUTION_CONFIDENCE=0.80
+TARGET_CANDIDATE_LIMIT=20
+TERM_PROVISIONAL_SECONDS=600
+TERM_DB_PATH=data/terms.db
+```
+
+`HA_BASE_URL` 用于 HA 原生 REST/WebSocket 目录读取，不会从 `HA_MCP_URL` 隐式推导。`HOME_ID` 和 `PERSON_ID` 由本地可信通道注入，公开命令 API 不接受浏览器提交这两个身份字段。术语库使用 SQLite WAL 和 `0600` 文件权限，保留不可更新、不可删除的状态修订。迁移排障时可以临时设置 `TARGET_RESOLUTION_ENABLED=false` 回到旧兼容路径，但该路径不会提供候选约束和术语学习。
 
 事件的 `source + event_id` 是幂等键；稳定 `message_id` 会贯穿接收、上下文、规则匹配以及可能的 Codex/HA 调用。人员位置等最新事实默认写入 `data/events.db`，可通过 `EVENT_DB_PATH` 修改。当前规则引擎默认为空，因此事件只会被记录并更新上下文，不会自主控制设备。
 

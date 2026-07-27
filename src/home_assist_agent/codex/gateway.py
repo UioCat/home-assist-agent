@@ -439,7 +439,6 @@ class CodexGateway:
                 "sources": candidate.sources,
                 "matched_terms": candidate.matched_terms,
                 "rule_score": candidate.rule_score,
-                "evidence": candidate.evidence,
             }
             for candidate in candidates
         ]

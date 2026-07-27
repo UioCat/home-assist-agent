@@ -72,6 +72,17 @@ class FakeEventService:
         )
 
 
+class FakePromotionWorker:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def start(self) -> None:
+        self.calls.append("start")
+
+    async def stop(self) -> None:
+        self.calls.append("stop")
+
+
 @dataclass
 class FakeAuditQuery:
     messages: list[AuditMessageSummary] = field(default_factory=list)
@@ -297,3 +308,19 @@ def test_audit_endpoints_list_messages_and_one_complete_trace() -> None:
     assert events_response.status_code == 200
     assert events_response.json()[0]["event_type"] == "user.request"
     assert missing_response.status_code == 404
+
+
+def test_application_lifespan_starts_and_stops_term_worker() -> None:
+    worker = FakePromotionWorker()
+    app = create_app(
+        command_service=FakeCommandService(),
+        health_service=FakeHealthService(),
+        audit_query=FakeAuditQuery(),
+        promotion_worker=worker,
+    )
+
+    with TestClient(app) as client:
+        assert client.get("/api/health").status_code == 200
+        assert worker.calls == ["start"]
+
+    assert worker.calls == ["start", "stop"]

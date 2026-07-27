@@ -1,6 +1,9 @@
 from dataclasses import dataclass
 from importlib import import_module
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 from fastapi.testclient import TestClient
@@ -76,19 +79,35 @@ async def test_codex_probe_distinguishes_missing_binary_from_missing_login() -> 
 
 def test_settings_load_ha_connection_from_environment(monkeypatch) -> None:
     monkeypatch.setenv("HA_MCP_URL", "http://ha.local:8123/api/mcp")
+    monkeypatch.setenv("HA_BASE_URL", "http://ha.local:8123")
     monkeypatch.setenv("HA_TOKEN", "top-secret")
     monkeypatch.setenv("HA_MCP_TIMEOUT_SECONDS", "12")
     monkeypatch.setenv("AUDIT_DB_PATH", "runtime/audit.db")
     monkeypatch.setenv("EVENT_DB_PATH", "runtime/events.db")
+    monkeypatch.setenv("TERM_DB_PATH", "runtime/terms.db")
+    monkeypatch.setenv("HOME_ID", "home-1")
+    monkeypatch.setenv("PERSON_ID", "person-1")
+    monkeypatch.setenv("TARGET_RESOLUTION_ENABLED", "true")
+    monkeypatch.setenv("TARGET_RESOLUTION_CONFIDENCE", "0.85")
+    monkeypatch.setenv("TARGET_CANDIDATE_LIMIT", "12")
+    monkeypatch.setenv("TERM_PROVISIONAL_SECONDS", "600")
 
     settings = AppSettings(_env_file=None)
 
     assert settings.ha_mcp_url == "http://ha.local:8123/api/mcp"
+    assert settings.ha_base_url == "http://ha.local:8123"
     assert settings.ha_token is not None
     assert settings.ha_token.get_secret_value() == "top-secret"
     assert settings.ha_mcp_timeout_seconds == 12
     assert settings.audit_db_path == Path("runtime/audit.db")
     assert settings.event_db_path == Path("runtime/events.db")
+    assert settings.term_db_path == Path("runtime/terms.db")
+    assert settings.home_id == "home-1"
+    assert settings.person_id == "person-1"
+    assert settings.target_resolution_enabled is True
+    assert settings.target_resolution_confidence == 0.85
+    assert settings.target_candidate_limit == 12
+    assert settings.term_provisional_seconds == 600
 
 
 def test_default_runtime_builds_without_ha_credentials(tmp_path: Path) -> None:
@@ -96,6 +115,9 @@ def test_default_runtime_builds_without_ha_credentials(tmp_path: Path) -> None:
         _env_file=None,
         ha_token=None,
         frontend_dist=tmp_path / "missing-dist",
+        audit_db_path=tmp_path / "audit.db",
+        event_db_path=tmp_path / "events.db",
+        term_db_path=tmp_path / "terms.db",
     )
 
     app = build_app(settings)
@@ -104,6 +126,27 @@ def test_default_runtime_builds_without_ha_credentials(tmp_path: Path) -> None:
     assert "/api/commands" in route_paths
     assert "/api/events" in route_paths
     assert "/api/health" in route_paths
+    assert app.state.target_resolution_enabled is True
+    assert app.state.term_promotion_worker is not None
+
+
+def test_runtime_feature_flag_off_keeps_compatibility_path(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings(
+        _env_file=None,
+        ha_token=None,
+        target_resolution_enabled=False,
+        frontend_dist=tmp_path / "missing-dist",
+        audit_db_path=tmp_path / "audit.db",
+        event_db_path=tmp_path / "events.db",
+        term_db_path=tmp_path / "terms.db",
+    )
+
+    app = build_app(settings)
+
+    assert app.state.target_resolution_enabled is False
+    assert app.state.term_promotion_worker is None
 
 
 def test_runtime_serves_built_frontend(tmp_path: Path) -> None:
@@ -122,6 +165,9 @@ def test_runtime_serves_built_frontend(tmp_path: Path) -> None:
         _env_file=None,
         ha_token=None,
         frontend_dist=frontend_dist,
+        audit_db_path=tmp_path / "audit.db",
+        event_db_path=tmp_path / "events.db",
+        term_db_path=tmp_path / "terms.db",
     )
 
     client = TestClient(build_app(settings))
@@ -143,6 +189,27 @@ def test_asgi_module_exposes_application() -> None:
     assert module.app.title == "Home Assist Agent"
 
 
+def test_catalog_module_imports_in_a_fresh_process() -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(repository_root / "src")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import home_assist_agent.ha.catalog",
+        ],
+        cwd=repository_root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_cli_starts_server_with_configured_binding(monkeypatch) -> None:
     cli = import_module("home_assist_agent.__main__")
     settings = AppSettings(
@@ -158,7 +225,7 @@ def test_cli_starts_server_with_configured_binding(monkeypatch) -> None:
         lambda app, **kwargs: calls.append((app, kwargs)),
     )
 
-    cli.main()
+    cli.main([])
 
     assert calls == [
         (
@@ -166,3 +233,23 @@ def test_cli_starts_server_with_configured_binding(monkeypatch) -> None:
             {"host": "127.0.0.2", "port": 8765},
         )
     ]
+
+
+def test_cli_help_exits_without_starting_server(
+    monkeypatch,
+    capsys,
+) -> None:
+    cli = import_module("home_assist_agent.__main__")
+    calls: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        cli.uvicorn,
+        "run",
+        lambda app, **kwargs: calls.append((app, kwargs)),
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["--help"])
+
+    assert exc_info.value.code == 0
+    assert "Home Assist Agent" in capsys.readouterr().out
+    assert calls == []
