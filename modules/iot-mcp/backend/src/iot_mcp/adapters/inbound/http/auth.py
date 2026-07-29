@@ -100,6 +100,18 @@ def authenticate_request(
     return TrustedPrincipal.web_session(payload["actor"])
 
 
+def verified_session_payload(request: Request, settings: Settings) -> dict[str, Any]:
+    """Verify only the browser cookie; bearer credentials cannot bootstrap a session."""
+    session = request.cookies.get(settings.session_cookie_name)
+    if session is None:
+        raise SafeControlError(
+            "session_invalid", "web session is invalid or expired", status_code=401
+        )
+    return SessionCodec(
+        settings.session_signing_secret, settings.session_ttl_seconds
+    ).verify(session)
+
+
 def require_web_session(request: Request, settings: Settings) -> TrustedPrincipal:
     principal = authenticate_request(request, settings, require_csrf=True)
     if principal.source != "web_session":

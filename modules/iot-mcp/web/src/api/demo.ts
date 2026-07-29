@@ -1,17 +1,19 @@
 import type {
   ConfirmationItem,
+  ConsoleOperation,
   Device,
   DeviceDetail,
   DeviceEvent,
   DeviceState,
   IoTApi,
   MessageChannelStatus,
-  Operation,
+  OperationResult,
   ProviderStatus,
   SyncResult,
   ThingModelVersion,
   ThingProduct,
 } from "./types";
+import { createDemoDeviceStates } from "./demoFixtures";
 
 const timestamp = "2026-07-29T08:26:12Z";
 const staleTimestamp = "2026-07-29T07:41:04Z";
@@ -156,28 +158,7 @@ const devices: Device[] = [
   },
 ];
 
-const states: Record<string, DeviceState> = {
-  "device-lock": {
-    device_ref: "lock.front_door",
-    values: { LockState: "LOCK", BatteryLevel: 78 },
-    observed_at: timestamp,
-    freshness: "fresh",
-  },
-  "device-climate": {
-    device_ref: "climate.living_room",
-    values: { PowerSwitch: true, CurrentTemperature: 24.3, TargetTemperature: 23 },
-    observed_at: "2026-07-29T08:24:49Z",
-    freshness: "fresh",
-  },
-  "device-lamp": {
-    device_ref: "lan:desk-lamp",
-    values: {},
-    observed_at: staleTimestamp,
-    freshness: "stale",
-  },
-};
-
-function detailFor(device: Device): DeviceDetail {
+function detailFor(device: Device, states: Record<string, DeviceState>): DeviceDetail {
   const model = device.product_id === "product-lock" ? lockModel : climateModel;
   return {
     device,
@@ -215,61 +196,52 @@ function detailFor(device: Device): DeviceDetail {
   };
 }
 
-const baseOperations: Operation[] = [
+const baseOperations: ConsoleOperation[] = [
   {
     operation_id: "op-pending",
     device_id: "device-lock",
-    initiator: "scheduler:nightly-check",
-    interaction_mode: "autonomous",
-    action: { type: "properties", values: { LockState: "UNLOCK" } },
-    binding_id: "binding-device-lock",
+    source_category: "autonomous",
+    source_label: "Scheduler",
+    action_kind: "properties",
+    action_summary: "写入 1 个属性：LockState",
+    target: "lock.front_door",
     provider_id: "home-assistant",
     provider_type: "home_assistant",
-    external_device_ref: "lock.front_door",
     binding_revision: 4,
+    risk_level: "high",
     status: "pending_confirmation",
-    idempotency_key: "nightly-0729",
-    provider_request: null,
-    provider_result: null,
-    result: { confirmation_id: "confirm-1" },
     created_at: "2026-07-29T08:23:10Z",
     updated_at: "2026-07-29T08:23:10Z",
   },
   {
     operation_id: "op-success",
     device_id: "device-climate",
-    initiator: "web_session:owner",
-    interaction_mode: "human_interactive",
-    action: { type: "properties", values: { TargetTemperature: 23 } },
-    binding_id: "binding-device-climate",
+    source_category: "human_interactive",
+    source_label: "Web operator",
+    action_kind: "properties",
+    action_summary: "写入 1 个属性：TargetTemperature",
+    target: "climate.living_room",
     provider_id: "home-assistant",
     provider_type: "home_assistant",
-    external_device_ref: "climate.living_room",
     binding_revision: 2,
+    risk_level: "medium",
     status: "succeeded",
-    idempotency_key: "web-0729",
-    provider_request: { service: "climate.set_temperature" },
-    provider_result: { ok: true },
-    result: { after: { TargetTemperature: 23 } },
     created_at: "2026-07-29T08:12:01Z",
     updated_at: "2026-07-29T08:12:03Z",
   },
   {
     operation_id: "op-failed",
     device_id: "device-lamp",
-    initiator: "mcp:agent",
-    interaction_mode: "autonomous",
-    action: { type: "service", identifier: "TurnOn", inputs: {} },
-    binding_id: "binding-device-lamp",
+    source_category: "autonomous",
+    source_label: "MCP agent",
+    action_kind: "service",
+    action_summary: "调用服务 TurnOn（0 个参数）",
+    target: "lan:desk-lamp",
     provider_id: "lan-http-mock",
     provider_type: "lan_http",
-    external_device_ref: "lan:desk-lamp",
     binding_revision: 1,
+    risk_level: "low",
     status: "failed",
-    idempotency_key: "mcp-0728",
-    provider_request: { endpoint: "/power" },
-    provider_result: { error_code: "provider_offline" },
-    result: { message: "Provider 无响应" },
     created_at: "2026-07-29T07:42:08Z",
     updated_at: "2026-07-29T07:42:18Z",
   },
@@ -309,6 +281,8 @@ const events: DeviceEvent[] = [
 ];
 
 export class DemoApiClient implements IoTApi {
+  private sessionInvalidHandler: () => void = () => undefined;
+  private readonly states = createDemoDeviceStates();
   private operations = structuredClone(baseOperations);
   private confirmations: ConfirmationItem[] = [
     {
@@ -316,21 +290,28 @@ export class DemoApiClient implements IoTApi {
         confirmation_id: "confirm-1",
         operation_id: "op-pending",
         action_hash: "hash-1",
-        authorized_actor: "owner",
-        binding_id: "binding-device-lock",
+        target: "lock.front_door",
         provider_id: "home-assistant",
         provider_type: "home_assistant",
-        external_device_ref: "lock.front_door",
         binding_revision: 4,
         expires_at: "2026-07-29T10:28:10Z",
         decision: "pending",
-        decided_at: null,
         created_at: "2026-07-29T08:23:10Z",
+        risk_level: "high",
       },
       operation: this.operations[0],
     },
   ];
 
+  onSessionInvalid(handler: () => void) {
+    this.sessionInvalidHandler = handler;
+    return () => {
+      if (this.sessionInvalidHandler === handler) this.sessionInvalidHandler = () => undefined;
+    };
+  }
+  async bootstrapSession() {
+    return { csrf_token: "demo-csrf", expires_at: "2099-01-01T00:00:00Z" };
+  }
   async createSession(): Promise<void> {}
   async listThingModels() { return structuredClone(products); }
   async listThingModelVersions(productId: string) {
@@ -345,15 +326,15 @@ export class DemoApiClient implements IoTApi {
   async getDevice(deviceId: string) {
     const device = devices.find((item) => item.device_id === deviceId);
     if (!device) throw new Error("demo device not found");
-    return structuredClone(detailFor(device));
+    return structuredClone(detailFor(device, this.states));
   }
-  async getDeviceState(deviceId: string) { return structuredClone(states[deviceId]); }
+  async getDeviceState(deviceId: string) { return structuredClone(this.states[deviceId]); }
   async writeProperties(deviceId: string, values: Record<string, unknown>) {
-    Object.assign(states[deviceId].values, values);
-    return this.addHumanOperation(deviceId, { type: "properties", values });
+    Object.assign(this.states[deviceId].values, values);
+    return this.addHumanOperation(deviceId, "properties", `写入 ${Object.keys(values).length} 个属性：${Object.keys(values).join("、")}`);
   }
   async invokeService(deviceId: string, identifier: string, inputs: Record<string, unknown>) {
-    return this.addHumanOperation(deviceId, { type: "service", identifier, inputs });
+    return this.addHumanOperation(deviceId, "service", `调用服务 ${identifier}（${Object.keys(inputs).length} 个参数）`);
   }
   async listOperations() { return structuredClone(this.operations); }
   async listConfirmations(decision?: string) {
@@ -399,12 +380,17 @@ export class DemoApiClient implements IoTApi {
     ];
   }
 
-  private addHumanOperation(deviceId: string, action: Record<string, unknown>): Operation {
-    const operation: Operation = {
+  private addHumanOperation(
+    deviceId: string,
+    actionKind: "properties" | "service",
+    actionSummary: string,
+  ): OperationResult {
+    const operation: ConsoleOperation = {
       ...baseOperations[1],
       operation_id: `demo-${this.operations.length + 1}`,
       device_id: deviceId,
-      action,
+      action_kind: actionKind,
+      action_summary: actionSummary,
       created_at: timestamp,
       updated_at: timestamp,
     };

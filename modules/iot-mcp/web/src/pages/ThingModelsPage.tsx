@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import { useApi } from "../api/context";
 import type { ThingModelVersion, ThingProduct } from "../api/types";
@@ -17,6 +17,8 @@ export function ThingModelsPage() {
   const api = useApi();
   const [selected, setSelected] = useState<ModelRow | null>(null);
   const [validation, setValidation] = useState("");
+  const [validationBusy, setValidationBusy] = useState(false);
+  const validationLock = useRef(false);
   const query = useQuery(async () => {
     const products = await api.listThingModels();
     const rows = await Promise.all(
@@ -35,13 +37,18 @@ export function ThingModelsPage() {
 
   async function validate() {
     const version = selected?.versions[0];
-    if (!version) return;
+    if (!version || validationLock.current) return;
+    validationLock.current = true;
+    setValidationBusy(true);
     setValidation("正在校验…");
     try {
       await api.validateThingModel(version.model_version_id);
       setValidation(`版本 v${version.version} 通过标准 TSL 校验`);
     } catch (error) {
       setValidation(error instanceof Error ? error.message : "校验失败");
+    } finally {
+      validationLock.current = false;
+      setValidationBusy(false);
     }
   }
 
@@ -76,7 +83,7 @@ export function ThingModelsPage() {
               <>
                 <div className="section-heading">
                   <div><p className="eyebrow mono">{selected.product.product_key}</p><h2>{selected.product.name}</h2></div>
-                  <button className="button button--secondary" disabled={!selected.versions[0]} onClick={validate}>校验当前版本</button>
+                  <button className="button button--secondary" disabled={!selected.versions[0] || validationBusy} onClick={validate}>{validationBusy ? "正在校验…" : "校验当前版本"}</button>
                 </div>
                 {validation ? <p className="inline-result" role="status">{validation}</p> : null}
                 {selected.versions.map((version) => (

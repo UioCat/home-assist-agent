@@ -1,63 +1,110 @@
 import { useState } from "react";
 
-import type { Operation, TslDataType, TslParameter, TslProperty, TslService } from "../api/types";
+import type {
+  OperationResult,
+  TslDataType,
+  TslParameter,
+  TslProperty,
+  TslService,
+} from "../api/types";
 import { StatusBadge } from "./StatusBadge";
 import { formatValue } from "./format";
+import {
+  initialTslInput,
+  normalizeNumericSpecs,
+  parseTslInput,
+} from "./tslInput";
 
-function initialInput(value: unknown, type: TslDataType): string | boolean {
-  if (type.type === "bool") return Boolean(value);
-  return value === undefined || value === null ? "" : String(value);
-}
-
-function parseInput(value: string | boolean, type: TslDataType): unknown {
-  if (type.type === "bool") return Boolean(value);
-  if (["int", "float", "double"].includes(type.type)) return Number(value);
-  return value;
+interface Draft {
+  value: string | boolean;
+  touched: boolean;
+  error: string;
 }
 
 function DataInput({
   id,
   label,
   type,
-  value,
+  draft,
+  required,
   onChange,
 }: {
   id: string;
   label: string;
   type: TslDataType;
-  value: string | boolean;
+  draft: Draft;
+  required: boolean;
   onChange: (value: string | boolean) => void;
 }) {
+  const errorId = `${id}-error`;
+  const describedBy = draft.error ? errorId : undefined;
   if (type.type === "bool") {
     return (
       <label className="toggle-control" htmlFor={id}>
-        <input id={id} type="checkbox" checked={Boolean(value)} onChange={(event) => onChange(event.target.checked)} />
+        <input
+          id={id}
+          type="checkbox"
+          checked={Boolean(draft.value)}
+          required={required}
+          aria-invalid={Boolean(draft.error)}
+          aria-describedby={describedBy}
+          onChange={(event) => onChange(event.target.checked)}
+        />
         <span aria-hidden="true" />
         <strong>{label}</strong>
+        {draft.error ? <small className="input-error" id={errorId}>{draft.error}</small> : null}
       </label>
     );
   }
   if (type.type === "enum" && !Array.isArray(type.specs)) {
     return (
-      <label htmlFor={id}><span>{label}</span>
-        <select id={id} value={String(value)} onChange={(event) => onChange(event.target.value)}>
-          {Object.entries(type.specs).map(([key, name]) => <option key={key} value={key}>{String(name)} · {key}</option>)}
+      <label htmlFor={id}>
+        <span>{label}</span>
+        <select
+          id={id}
+          value={String(draft.value)}
+          required={required}
+          aria-invalid={Boolean(draft.error)}
+          aria-describedby={describedBy}
+          onChange={(event) => onChange(event.target.value)}
+        >
+          <option value="" disabled>请选择</option>
+          {Object.entries(type.specs).map(([key, name]) => (
+            <option key={key} value={key}>{String(name)} · {key}</option>
+          ))}
         </select>
+        {draft.error ? <small className="input-error" id={errorId}>{draft.error}</small> : null}
       </label>
     );
   }
-  const specs = Array.isArray(type.specs) ? {} : type.specs;
+  const numeric = ["int", "float", "double"].includes(type.type);
+  const json = type.type === "struct" || type.type === "array";
+  const specs = normalizeNumericSpecs(type);
+  const common = {
+    id,
+    value: String(draft.value),
+    required,
+    "aria-invalid": Boolean(draft.error),
+    "aria-describedby": describedBy,
+    onChange: (event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
+      onChange(event.target.value),
+  };
   return (
-    <label htmlFor={id}><span>{label}</span>
-      <input
-        id={id}
-        type={["int", "float", "double"].includes(type.type) ? "number" : "text"}
-        value={String(value)}
-        min={typeof specs.min === "number" ? specs.min : undefined}
-        max={typeof specs.max === "number" ? specs.max : undefined}
-        step={typeof specs.step === "number" ? specs.step : undefined}
-        onChange={(event) => onChange(event.target.value)}
-      />
+    <label htmlFor={id}>
+      <span>{label}</span>
+      {json ? (
+        <textarea {...common} rows={4} spellCheck={false} />
+      ) : (
+        <input
+          {...common}
+          type={numeric ? "number" : type.type === "date" ? "datetime-local" : "text"}
+          min={numeric ? specs.min : undefined}
+          max={numeric ? specs.max : undefined}
+          step={numeric ? specs.step : undefined}
+        />
+      )}
+      {type.type === "date" ? <small className="input-help">按本地时间输入，提交为 epoch 毫秒。</small> : null}
+      {draft.error ? <small className="input-error" id={errorId}>{draft.error}</small> : null}
     </label>
   );
 }
@@ -71,19 +118,36 @@ export function PropertyControl({
   property: TslProperty;
   currentValue: unknown;
   risk: string;
-  onSubmit: (value: unknown) => Promise<Operation>;
+  onSubmit: (value: unknown) => Promise<OperationResult>;
 }) {
-  const [value, setValue] = useState<string | boolean>(() => initialInput(currentValue, property.dataType));
+  const [draft, setDraft] = useState<Draft>(() => ({
+    value: initialTslInput(currentValue, property.dataType),
+    touched: false,
+    error: "",
+  }));
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState("");
   const id = `property-${property.identifier}`;
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
+    let parsed;
+    try {
+      parsed = parseTslInput(draft.value, property.dataType, {
+        required: true,
+        touched: true,
+      });
+    } catch (error) {
+      setDraft((current) => ({
+        ...current,
+        error: error instanceof Error ? error.message : "输入无效",
+      }));
+      return;
+    }
     setBusy(true);
     setResult("");
     try {
-      const operation = await onSubmit(parseInput(value, property.dataType));
+      const operation = await onSubmit(parsed.value);
       setResult(`执行结果：${operation.status} · ${operation.operation_id}`);
     } catch (error) {
       setResult(`执行失败：${error instanceof Error ? error.message : "未知错误"}`);
@@ -93,10 +157,17 @@ export function PropertyControl({
   }
 
   return (
-    <form className="control-row" onSubmit={submit}>
+    <form className="control-row" onSubmit={submit} noValidate>
       <div className="control-row__identity"><strong>{property.name}</strong><span className="mono">{property.identifier}</span></div>
       <div className="control-row__current"><span>当前观测</span><strong>{formatValue(currentValue)}</strong></div>
-      <DataInput id={id} label="目标值" type={property.dataType} value={value} onChange={setValue} />
+      <DataInput
+        id={id}
+        label="目标值"
+        type={property.dataType}
+        draft={draft}
+        required
+        onChange={(value) => setDraft({ value, touched: true, error: "" })}
+      />
       <StatusBadge value={risk} />
       <button className="button button--primary" disabled={busy} type="submit">{busy ? "发送中…" : "直接写入"}</button>
       <p className="control-row__result" aria-live="polite">{result}</p>
@@ -111,21 +182,47 @@ export function ServiceControl({
 }: {
   service: TslService;
   risk: string;
-  onSubmit: (inputs: Record<string, unknown>) => Promise<Operation>;
+  onSubmit: (inputs: Record<string, unknown>) => Promise<OperationResult>;
 }) {
-  const [values, setValues] = useState<Record<string, string | boolean>>(() =>
-    Object.fromEntries(service.inputData.map((item) => [item.identifier, initialInput(undefined, item.dataType)])),
+  const [drafts, setDrafts] = useState<Record<string, Draft>>(() =>
+    Object.fromEntries(
+      service.inputData.map((item) => [
+        item.identifier,
+        { value: initialTslInput(undefined, item.dataType), touched: false, error: "" },
+      ]),
+    ),
   );
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState("");
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
+    const inputs: Record<string, unknown> = {};
+    const errors: Record<string, string> = {};
+    for (const item of service.inputData) {
+      try {
+        const parsed = parseTslInput(drafts[item.identifier].value, item.dataType, {
+          required: Boolean(item.required),
+          touched: drafts[item.identifier].touched,
+        });
+        if (parsed.present) inputs[item.identifier] = parsed.value;
+      } catch (error) {
+        errors[item.identifier] = error instanceof Error ? error.message : "输入无效";
+      }
+    }
+    if (Object.keys(errors).length) {
+      setDrafts((current) =>
+        Object.fromEntries(
+          Object.entries(current).map(([key, draft]) => [
+            key,
+            { ...draft, error: errors[key] ?? "" },
+          ]),
+        ),
+      );
+      return;
+    }
     setBusy(true);
     setResult("");
-    const inputs = Object.fromEntries(
-      service.inputData.map((item) => [item.identifier, parseInput(values[item.identifier], item.dataType)]),
-    );
     try {
       const operation = await onSubmit(inputs);
       setResult(`执行结果：${operation.status} · ${operation.operation_id}`);
@@ -137,7 +234,7 @@ export function ServiceControl({
   }
 
   return (
-    <form className="service-control" onSubmit={submit}>
+    <form className="service-control" onSubmit={submit} noValidate>
       <div className="service-control__header">
         <div><strong>{service.name}</strong><span className="mono">{service.identifier}</span></div>
         <StatusBadge value={risk} />
@@ -149,8 +246,14 @@ export function ServiceControl({
             id={`service-${service.identifier}-${parameter.identifier}`}
             label={`${parameter.name}${parameter.required ? " *" : ""}`}
             type={parameter.dataType}
-            value={values[parameter.identifier]}
-            onChange={(value) => setValues((current) => ({ ...current, [parameter.identifier]: value }))}
+            draft={drafts[parameter.identifier]}
+            required={Boolean(parameter.required)}
+            onChange={(value) =>
+              setDrafts((current) => ({
+                ...current,
+                [parameter.identifier]: { value, touched: true, error: "" },
+              }))
+            }
           />
         ))}
       </div>

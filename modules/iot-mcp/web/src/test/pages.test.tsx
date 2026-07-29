@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
@@ -6,7 +6,19 @@ import { ApiProvider } from "../api/context";
 import { DemoApiClient } from "../api/demo";
 import { PageState } from "../components/PageState";
 import { DeviceDetailPage } from "../pages/DeviceDetailPage";
+import { DevicesPage } from "../pages/DevicesPage";
 import { OperationsPage } from "../pages/OperationsPage";
+import { ThingModelsPage } from "../pages/ThingModelsPage";
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
 
 function renderWithApi(
   ui: React.ReactNode,
@@ -28,6 +40,22 @@ describe("console states and safety interactions", () => {
     expect(screen.getByText("没有设备")).toBeInTheDocument();
     rerender(<PageState state="error" label="API 不可用" detail="req-1" />);
     expect(screen.getByRole("alert")).toHaveTextContent("API 不可用");
+  });
+
+  it("renders loading, empty, and rejected states from a real device API query", async () => {
+    const loadingApi = new DemoApiClient();
+    const pending = deferred<Awaited<ReturnType<DemoApiClient["listDevices"]>>>();
+    vi.spyOn(loadingApi, "listDevices").mockReturnValue(pending.promise);
+    const loading = renderWithApi(<DevicesPage />, loadingApi);
+    expect(screen.getByRole("status")).toHaveTextContent("正在读取设备实例");
+    await act(async () => pending.resolve([]));
+    expect(await screen.findByText("没有符合筛选条件的设备")).toBeInTheDocument();
+    loading.unmount();
+
+    const failingApi = new DemoApiClient();
+    vi.spyOn(failingApi, "listDevices").mockRejectedValue(new Error("provider offline"));
+    renderWithApi(<DevicesPage />, failingApi);
+    expect(await screen.findByRole("alert")).toHaveTextContent("provider offline");
   });
 
   it("executes human property control directly without a confirmation UI", async () => {
@@ -76,5 +104,38 @@ describe("console states and safety interactions", () => {
 
     await waitFor(() => expect(reject).toHaveBeenCalledWith("confirm-1", "reject", "hash-1"));
     expect(screen.getByText(/决定已提交：拒绝/)).toBeInTheDocument();
+  });
+
+  it("keeps mutable demo device state isolated per API client", async () => {
+    const first = new DemoApiClient();
+    const second = new DemoApiClient();
+
+    await first.writeProperties("device-lock", { LockState: "UNLOCK" });
+
+    expect((await first.getDeviceState("device-lock")).values.LockState).toBe("UNLOCK");
+    expect((await second.getDeviceState("device-lock")).values.LockState).toBe("LOCK");
+    expect((await second.listOperations())[0].operation_id).toBe("op-pending");
+  });
+
+  it("disables model validation and prevents duplicate submissions while pending", async () => {
+    const api = new DemoApiClient();
+    const pending = deferred<{ valid: boolean; model_version_id: string }>();
+    const validate = vi.spyOn(api, "validateThingModel").mockReturnValue(pending.promise);
+    const user = userEvent.setup();
+    renderWithApi(<ThingModelsPage />, api);
+
+    await user.click(await screen.findByRole("button", { name: /家庭门锁/ }));
+    const button = screen.getByRole("button", { name: "校验当前版本" });
+    act(() => {
+      button.click();
+      button.click();
+    });
+
+    await waitFor(() => expect(validate).toHaveBeenCalledOnce());
+    expect(screen.getByRole("button", { name: "正在校验…" })).toBeDisabled();
+    await act(async () =>
+      pending.resolve({ valid: true, model_version_id: "model-lock-v3" }),
+    );
+    expect(await screen.findByText(/通过标准 TSL 校验/)).toBeInTheDocument();
   });
 });

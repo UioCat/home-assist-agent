@@ -7,7 +7,7 @@ import { ErrorState, PageState } from "../components/PageState";
 import { PageHeader } from "../components/PageHeader";
 import { SignalTrail } from "../components/SignalTrail";
 import { StatusBadge } from "../components/StatusBadge";
-import { actionSummary, formatDateTime, humanize } from "../components/format";
+import { formatDateTime, humanize } from "../components/format";
 
 export function OperationsPage() {
   const api = useApi();
@@ -65,13 +65,13 @@ export function OperationsPage() {
                   <article className="confirmation-row" key={item.confirmation.confirmation_id}>
                     <div className="confirmation-row__source">
                       <span className="source-label">自动任务</span>
-                      <strong>{item.operation?.initiator ?? "未知来源"}</strong>
+                      <strong>{item.operation?.source_label ?? "未知来源"}</strong>
                       <span className="mono">{item.confirmation.confirmation_id}</span>
                     </div>
                     <div className="confirmation-row__action">
-                      <strong>{actionSummary(item.operation?.action)}</strong>
+                      <strong>{item.operation?.action_summary ?? "无动作摘要"}</strong>
                       <dl>
-                        <div><dt>目标</dt><dd className="mono">{item.confirmation.external_device_ref ?? item.operation?.device_id}</dd></div>
+                        <div><dt>目标</dt><dd className="mono">{item.confirmation.target}</dd></div>
                         <div><dt>Provider</dt><dd className="mono">{item.confirmation.provider_id ?? "unbound"}</dd></div>
                         <div><dt>过期</dt><dd className="mono">{formatDateTime(item.confirmation.expires_at)}</dd></div>
                         <div><dt>绑定</dt><dd>r{item.confirmation.binding_revision}</dd></div>
@@ -96,13 +96,13 @@ export function OperationsPage() {
                   <details className="ledger-row" key={operation.operation_id}>
                     <summary>
                       <SignalTrail compact status={operation.status} timestamp={operation.updated_at} provider={operation.provider_id ?? "unbound"} />
-                      <span className="ledger-row__action"><strong>{actionSummary(operation.action)}</strong><small>{operation.initiator} · {humanize(operation.interaction_mode)}</small></span>
+                      <span className="ledger-row__action"><strong>{operation.action_summary}</strong><small>{operation.source_label} · {humanize(operation.source_category)}</small></span>
                       <StatusBadge value={operation.status} />
                     </summary>
                     <div className="ledger-row__detail">
                       <div><span>Operation ID</span><code>{operation.operation_id}</code></div>
-                      <div><span>Provider 请求</span><pre>{JSON.stringify(operation.provider_request, null, 2)}</pre></div>
-                      <div><span>Provider 结果</span><pre>{JSON.stringify(operation.provider_result ?? operation.result, null, 2)}</pre></div>
+                      <div><span>目标</span><code>{operation.target}</code></div>
+                      <div><span>绑定修订</span><code>{operation.binding_revision ? `r${operation.binding_revision}` : "unbound"}</code></div>
                     </div>
                   </details>
                 ))}

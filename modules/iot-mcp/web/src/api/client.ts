@@ -6,11 +6,13 @@ import type {
   DeviceState,
   IoTApi,
   MessageChannelStatus,
-  Operation,
+  ConsoleOperation,
+  OperationResult,
   ProviderStatus,
   SyncResult,
   ThingModelVersion,
   ThingProduct,
+  SessionInfo,
 } from "./types";
 
 interface ErrorBody {
@@ -46,8 +48,29 @@ export class ApiError extends Error {
 
 export class HttpApiClient implements IoTApi {
   private csrfToken: string | null = null;
+  private sessionInvalidHandler: () => void;
 
-  constructor(private readonly baseUrl = "/api/v1") {}
+  constructor(
+    private readonly baseUrl = "/api/v1",
+    onSessionInvalid: () => void = () => undefined,
+  ) {
+    this.sessionInvalidHandler = onSessionInvalid;
+  }
+
+  onSessionInvalid(handler: () => void): () => void {
+    this.sessionInvalidHandler = handler;
+    return () => {
+      if (this.sessionInvalidHandler === handler) {
+        this.sessionInvalidHandler = () => undefined;
+      }
+    };
+  }
+
+  async bootstrapSession(): Promise<SessionInfo> {
+    const session = await this.request<SessionInfo>("/auth/session");
+    this.csrfToken = session.csrf_token;
+    return session;
+  }
 
   async createSession(adminToken: string): Promise<void> {
     const response = await this.request<{ csrf_token: string }>("/auth/session", {
@@ -87,21 +110,21 @@ export class HttpApiClient implements IoTApi {
   }
 
   writeProperties(deviceId: string, values: Record<string, unknown>) {
-    return this.request<Operation>(
+    return this.request<OperationResult>(
       `/devices/${encodeURIComponent(deviceId)}/properties:write`,
       { method: "POST", body: { values }, idempotencyKey: crypto.randomUUID() },
     );
   }
 
   invokeService(deviceId: string, identifier: string, inputs: Record<string, unknown>) {
-    return this.request<Operation>(
+    return this.request<OperationResult>(
       `/devices/${encodeURIComponent(deviceId)}/services/${encodeURIComponent(identifier)}:invoke`,
       { method: "POST", body: { inputs }, idempotencyKey: crypto.randomUUID() },
     );
   }
 
   listOperations() {
-    return this.request<Operation[]>("/operations");
+    return this.request<ConsoleOperation[]>("/operations");
   }
 
   listConfirmations(decision?: string) {
@@ -114,7 +137,7 @@ export class HttpApiClient implements IoTApi {
     decision: "approve" | "reject",
     actionHash: string,
   ) {
-    return this.request<Operation>(
+    return this.request<OperationResult>(
       `/confirmations/${encodeURIComponent(confirmationId)}:${decision}`,
       { method: "POST", body: { action_hash: actionHash } },
     );
@@ -175,6 +198,10 @@ export class HttpApiClient implements IoTApi {
     }
     if (!response.ok) {
       const body = (await response.json().catch(() => ({}))) as ErrorBody;
+      if (response.status === 401) {
+        this.csrfToken = null;
+        this.sessionInvalidHandler();
+      }
       throw new ApiError({
         status: response.status,
         code: body.error?.code ?? "http_error",

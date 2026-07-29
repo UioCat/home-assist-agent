@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
 import { ApiProvider } from "./api/context";
@@ -15,15 +15,58 @@ import { OverviewPage } from "./pages/OverviewPage";
 import { ProvidersPage } from "./pages/ProvidersPage";
 import { ThingModelsPage } from "./pages/ThingModelsPage";
 
-export function App() {
-  const demo = new URLSearchParams(window.location.search).get("demo") === "1";
-  const api = useMemo<IoTApi>(() => (demo ? new DemoApiClient() : new HttpApiClient()), [demo]);
-  const [authenticated, setAuthenticated] = useState(demo);
+type SessionState = "checking" | "authenticated" | "unauthenticated";
+
+export function App({
+  api: suppliedApi,
+  demo: suppliedDemo,
+}: {
+  api?: IoTApi;
+  demo?: boolean;
+  } = {}) {
+  const demo =
+    suppliedDemo ??
+    (new URLSearchParams(window.location.search).get("demo") === "1");
+  const [sessionState, setSessionState] = useState<SessionState>(
+    demo ? "authenticated" : "checking",
+  );
+  const api = useMemo<IoTApi>(
+    () =>
+      suppliedApi ??
+      (demo ? new DemoApiClient() : new HttpApiClient()),
+    [demo, suppliedApi],
+  );
+
+  useEffect(() => {
+    if (demo) {
+      setSessionState("authenticated");
+      return;
+    }
+    let active = true;
+    const unsubscribe = api.onSessionInvalid(() => {
+      if (active) setSessionState("unauthenticated");
+    });
+    setSessionState("checking");
+    api.bootstrapSession().then(
+      () => {
+        if (active) setSessionState("authenticated");
+      },
+      () => {
+        if (active) setSessionState("unauthenticated");
+      },
+    );
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [api, demo]);
 
   return (
     <ApiProvider api={api}>
-      {!authenticated ? (
-        <SessionGate api={api} onAuthenticated={() => setAuthenticated(true)} />
+      {sessionState === "checking" ? (
+        <SessionLoading />
+      ) : sessionState === "unauthenticated" ? (
+        <SessionGate api={api} onAuthenticated={() => setSessionState("authenticated")} />
       ) : (
         <BrowserRouter>
           <Routes>
@@ -42,6 +85,18 @@ export function App() {
         </BrowserRouter>
       )}
     </ApiProvider>
+  );
+}
+
+function SessionLoading() {
+  return (
+    <main className="session-screen">
+      <section className="session-panel" aria-live="polite">
+        <p className="eyebrow">IOT MCP / SECURE SESSION</p>
+        <h1>正在恢复安全 Session</h1>
+        <p>正在验证浏览器中的短期 HttpOnly Cookie。</p>
+      </section>
+    </main>
   );
 }
 

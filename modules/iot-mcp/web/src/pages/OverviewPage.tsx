@@ -6,7 +6,7 @@ import { ErrorState, PageState } from "../components/PageState";
 import { PageHeader } from "../components/PageHeader";
 import { SignalTrail } from "../components/SignalTrail";
 import { StatusBadge } from "../components/StatusBadge";
-import { actionSummary, formatDateTime } from "../components/format";
+import { formatDateTime } from "../components/format";
 import { consolePath } from "../components/routing";
 
 export function OverviewPage() {
@@ -109,8 +109,8 @@ export function OverviewPage() {
                     provider={operation.provider_id ?? "unbound"}
                   />
                   <div className="operation-row__summary">
-                    <strong>{actionSummary(operation.action)}</strong>
-                    <span>{operation.initiator} · {formatDateTime(operation.created_at)}</span>
+                    <strong>{operation.action_summary}</strong>
+                    <span>{operation.source_label} · {formatDateTime(operation.created_at)}</span>
                   </div>
                   <StatusBadge value={operation.status} />
                 </div>

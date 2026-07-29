@@ -111,45 +111,48 @@ export interface DeviceState {
   freshness: Freshness;
 }
 
-export interface Operation {
+export interface OperationResult {
   operation_id: string;
   device_id: string;
-  initiator: string;
-  interaction_mode: "human_interactive" | "autonomous";
-  action: Record<string, unknown>;
-  binding_id: string | null;
+  status: string;
+}
+
+export interface ConsoleOperation extends OperationResult {
+  source_category: "human_interactive" | "autonomous";
+  source_label: string;
+  action_kind: "properties" | "service" | "unknown";
+  action_summary: string;
+  target: string;
   provider_id: string | null;
   provider_type: string | null;
-  external_device_ref: string | null;
   binding_revision: number | null;
-  status: string;
-  idempotency_key: string;
-  provider_request: Record<string, unknown> | null;
-  provider_result: Record<string, unknown> | null;
-  result: Record<string, unknown> | null;
+  risk_level: RiskLevel | "unknown";
   created_at: string;
   updated_at: string;
 }
 
-export interface Confirmation {
+export interface ConsoleConfirmation {
   confirmation_id: string;
   operation_id: string;
   action_hash: string;
-  authorized_actor: string;
-  binding_id: string | null;
+  target: string;
   provider_id: string | null;
   provider_type: string | null;
-  external_device_ref: string | null;
   binding_revision: number;
   expires_at: string;
   decision: string;
-  decided_at: string | null;
   created_at: string;
+  risk_level: "high";
 }
 
 export interface ConfirmationItem {
-  confirmation: Confirmation;
-  operation: Operation | null;
+  confirmation: ConsoleConfirmation;
+  operation: ConsoleOperation | null;
+}
+
+export interface SessionInfo {
+  csrf_token: string;
+  expires_at: string;
 }
 
 export interface DeviceEvent {
@@ -185,6 +188,8 @@ export interface SyncResult {
 }
 
 export interface IoTApi {
+  onSessionInvalid(handler: () => void): () => void;
+  bootstrapSession(): Promise<SessionInfo>;
   createSession(adminToken: string): Promise<void>;
   listThingModels(): Promise<ThingProduct[]>;
   listThingModelVersions(productId: string): Promise<ThingModelVersion[]>;
@@ -192,19 +197,19 @@ export interface IoTApi {
   listDevices(): Promise<Device[]>;
   getDevice(deviceId: string): Promise<DeviceDetail>;
   getDeviceState(deviceId: string): Promise<DeviceState>;
-  writeProperties(deviceId: string, values: Record<string, unknown>): Promise<Operation>;
+  writeProperties(deviceId: string, values: Record<string, unknown>): Promise<OperationResult>;
   invokeService(
     deviceId: string,
     identifier: string,
     inputs: Record<string, unknown>,
-  ): Promise<Operation>;
-  listOperations(): Promise<Operation[]>;
+  ): Promise<OperationResult>;
+  listOperations(): Promise<ConsoleOperation[]>;
   listConfirmations(decision?: string): Promise<ConfirmationItem[]>;
   decideConfirmation(
     confirmationId: string,
     decision: "approve" | "reject",
     actionHash: string,
-  ): Promise<Operation>;
+  ): Promise<OperationResult>;
   listEvents(deviceId?: string): Promise<DeviceEvent[]>;
   listProviders(): Promise<ProviderStatus[]>;
   syncProvider(providerId: string): Promise<SyncResult>;

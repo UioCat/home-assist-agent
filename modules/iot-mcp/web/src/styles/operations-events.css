@@ -24,7 +24,7 @@
 .decision-count,
 .source-label {
   color: var(--warning-amber);
-  font: 500 11px "IBM Plex Mono", monospace;
+  font: 500 12px "IBM Plex Mono", monospace;
   letter-spacing: 0.04em;
 }
 
@@ -55,8 +55,8 @@
 .confirmation-row__source .mono,
 .confirmation-row__risk .mono {
   overflow: hidden;
-  color: var(--text-muted);
-  font-size: 10px;
+  color: var(--text-secondary);
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -77,8 +77,8 @@
 .confirmation-row__action dt,
 .confirmation-row__action dd {
   margin: 0;
-  color: var(--text-muted);
-  font-size: 10px;
+  color: var(--text-secondary);
+  font-size: 12px;
 }
 
 .confirmation-row__action dd {

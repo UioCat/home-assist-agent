@@ -6,7 +6,7 @@ import { PropertyControl, ServiceControl } from "../components/CapabilityControl
 import { ErrorState, PageState } from "../components/PageState";
 import { SignalTrail } from "../components/SignalTrail";
 import { StatusBadge } from "../components/StatusBadge";
-import { actionSummary, formatDateTime, formatValue } from "../components/format";
+import { formatDateTime, formatValue } from "../components/format";
 import { consolePath } from "../components/routing";
 
 export function DeviceDetailPage() {
@@ -102,8 +102,8 @@ export function DeviceDetailPage() {
                 {operations.map((operation) => (
                   <div className="operation-row operation-row--device" key={operation.operation_id}>
                     <SignalTrail compact status={operation.status} timestamp={operation.updated_at} provider={operation.provider_id ?? "unbound"} />
-                    <div className="operation-row__summary"><strong>{actionSummary(operation.action)}</strong><span>{operation.initiator}</span></div>
-                    <StatusBadge value={operation.interaction_mode} />
+                    <div className="operation-row__summary"><strong>{operation.action_summary}</strong><span>{operation.source_label}</span></div>
+                    <StatusBadge value={operation.source_category} />
                   </div>
                 ))}
               </div>

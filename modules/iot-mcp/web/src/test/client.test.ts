@@ -87,4 +87,64 @@ describe("HttpApiClient authentication", () => {
       }),
     );
   });
+
+  it("restores CSRF from the cookie bootstrap and sends it on authenticated POSTs", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ csrf_token: "restored-csrf", expires_at: "2026-07-29T10:00:00Z" }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ valid: true, model_version_id: "model-1" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new HttpApiClient();
+
+    await client.bootstrapSession();
+    await client.validateThingModel("model-1");
+
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/auth/session");
+    expect(fetchMock.mock.calls[1][1]?.headers).toMatchObject({
+      "X-CSRF-Token": "restored-csrf",
+    });
+  });
+
+  it("clears CSRF and notifies the app when a session becomes invalid", async () => {
+    const onInvalid = vi.fn();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ csrf_token: "csrf", expires_at: "future" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ error: { code: "session_invalid", message: "expired" } }),
+          { status: 401, headers: { "Content-Type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ valid: true, model_version_id: "model-1" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new HttpApiClient("/api/v1", onInvalid);
+
+    await client.bootstrapSession();
+    await expect(client.validateThingModel("model-1")).rejects.toBeInstanceOf(ApiError);
+    await client.validateThingModel("model-1");
+
+    expect(onInvalid).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[2][1]?.headers).not.toHaveProperty("X-CSRF-Token");
+  });
 });

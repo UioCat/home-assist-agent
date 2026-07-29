@@ -4,12 +4,21 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request, Response
 from pydantic import ValidationError
 
-from iot_mcp.adapters.inbound.http.auth import SessionCodec, verify_admin_token
+from iot_mcp.adapters.inbound.http.auth import (
+    SessionCodec,
+    verified_session_payload,
+    verify_admin_token,
+)
+from iot_mcp.adapters.inbound.http.console_dto import (
+    confirmation_console_dto,
+    operation_console_dto,
+)
 from iot_mcp.adapters.inbound.http.dependencies import (
     authenticated,
     interactive_principal,
@@ -49,6 +58,15 @@ async def create_session(request: Request, response: Response) -> dict[str, str]
         path="/api/v1",
     )
     return {"csrf_token": csrf}
+
+
+@router.get("/auth/session")
+async def get_session(request: Request) -> dict[str, str]:
+    payload = verified_session_payload(request, request.app.state.settings)
+    return {
+        "csrf_token": payload["csrf"],
+        "expires_at": datetime.fromtimestamp(payload["exp"], UTC).isoformat(),
+    }
 
 
 @router.get("/thing-models")
@@ -226,7 +244,11 @@ async def list_operations(
     request: Request, _: TrustedPrincipal = Depends(authenticated)
 ) -> list[dict[str, Any]]:
     operations = await request.app.state.operations.list_operations()
-    return [operation.model_dump(mode="json") for operation in operations]
+    result: list[dict[str, Any]] = []
+    for operation in operations:
+        device = await request.app.state.devices.get_device(operation.device_id)
+        result.append(operation_console_dto(operation, device))
+    return result
 
 
 @router.get("/operations/{operation_id}")
@@ -249,12 +271,12 @@ async def list_confirmations(
     result: list[dict[str, Any]] = []
     for confirmation in confirmations:
         operation = await request.app.state.operations.get_operation(confirmation.operation_id)
-        result.append(
-            {
-                "confirmation": confirmation.model_dump(mode="json"),
-                "operation": operation.model_dump(mode="json") if operation else None,
-            }
+        device = (
+            await request.app.state.devices.get_device(operation.device_id)
+            if operation
+            else None
         )
+        result.append(confirmation_console_dto(confirmation, operation, device))
     return result
 
 

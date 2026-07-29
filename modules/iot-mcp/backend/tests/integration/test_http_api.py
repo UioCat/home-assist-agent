@@ -4,9 +4,10 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from iot_mcp.adapters.inbound.http.app import create_app
+from iot_mcp.adapters.inbound.http.auth import SessionCodec
 from iot_mcp.adapters.outbound.mock.provider import MockDeviceProvider
 from iot_mcp.config.settings import Settings
-from iot_mcp.domain.enums import RiskLevel
+from iot_mcp.domain.enums import OperationStatus, RiskLevel
 from iot_mcp.domain.models import DeviceInstance, ProviderDeviceBinding
 
 
@@ -138,6 +139,52 @@ async def test_signed_session_and_bound_csrf_execute_human_high_risk(settings) -
 
 
 @pytest.mark.asyncio
+async def test_signed_session_bootstrap_restores_bound_csrf_without_renewal(
+    settings,
+) -> None:
+    async for _, client in _client(settings):
+        login = await client.post(
+            "/api/v1/auth/session",
+            headers={"Authorization": "Bearer admin-secret"},
+        )
+        restored = await client.get("/api/v1/auth/session")
+
+        assert restored.status_code == 200
+        assert restored.json()["csrf_token"] == login.json()["csrf_token"]
+        assert restored.json()["expires_at"].endswith("+00:00")
+        assert "set-cookie" not in restored.headers
+
+        write = await client.post(
+            "/api/v1/devices/door/properties:write",
+            headers={
+                "X-CSRF-Token": restored.json()["csrf_token"],
+                "Idempotency-Key": "restored-session",
+            },
+            json={"values": {"LockState": "LOCK"}},
+        )
+        assert write.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_expired_session_bootstrap_returns_stable_non_leaking_error(settings) -> None:
+    async for _, client in _client(settings):
+        expired, _ = SessionCodec(settings.session_signing_secret, -1).issue("owner")
+        client.cookies.set(settings.session_cookie_name, expired, path="/api/v1")
+
+        response = await client.get("/api/v1/auth/session")
+
+        assert response.status_code == 401
+        assert response.json()["error"]["code"] == "session_invalid"
+        assert set(response.json()["error"]) == {
+            "code",
+            "message",
+            "retryable",
+            "request_id",
+        }
+        assert expired not in response.text
+
+
+@pytest.mark.asyncio
 async def test_web_session_can_approve_only_the_original_bound_action(settings) -> None:
     async for app, client in _client(settings):
         pending_response = await client.post(
@@ -186,9 +233,21 @@ async def test_web_console_read_contract_exposes_operational_collections(setting
                 "Authorization": "Bearer machine-secret",
                 "Idempotency-Key": "console-pending",
             },
-            json={"values": {"LockState": "UNLOCK"}},
+            json={
+                "values": {
+                    "LockState": "UNLOCK",
+                    "pin": "839201",
+                    "nested": {"authorization": "Bearer provider-secret"},
+                }
+            },
         )
         confirmation_id = pending.json()["result"]["confirmation_id"]
+        await app.state.operations.update_operation(
+            pending.json()["operation_id"],
+            status=OperationStatus.PENDING_CONFIRMATION,
+            provider_request={"token": "provider-request-secret"},
+            provider_result={"nested": {"password": "provider-result-secret"}},
+        )
 
         operations = await client.get("/api/v1/operations")
         confirmations = await client.get("/api/v1/confirmations?decision=pending")
@@ -199,9 +258,38 @@ async def test_web_console_read_contract_exposes_operational_collections(setting
 
         assert operations.status_code == 200
         assert operations.json()[0]["operation_id"] == pending.json()["operation_id"]
+        assert set(operations.json()[0]) == {
+            "operation_id",
+            "device_id",
+            "source_category",
+            "source_label",
+            "action_kind",
+            "action_summary",
+            "target",
+            "provider_id",
+            "provider_type",
+            "binding_revision",
+            "risk_level",
+            "status",
+            "created_at",
+            "updated_at",
+        }
+        assert operations.json()[0]["source_label"] == "Machine automation"
         assert confirmations.status_code == 200
         assert confirmations.json()[0]["confirmation"]["confirmation_id"] == confirmation_id
-        assert confirmations.json()[0]["operation"]["initiator"] == "machine_token:agent"
+        assert "initiator" not in confirmations.json()[0]["operation"]
+        assert "authorized_actor" not in confirmations.json()[0]["confirmation"]
+        serialized = operations.text + confirmations.text
+        for secret in (
+            "machine_token:agent",
+            "console-pending",
+            "839201",
+            "Bearer provider-secret",
+            "provider-request-secret",
+            "provider-result-secret",
+        ):
+            assert secret not in serialized
+        assert '"pin"' not in serialized.lower()
         assert events.status_code == 200
         assert events.json() == []
         assert providers.status_code == 200

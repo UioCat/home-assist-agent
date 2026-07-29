@@ -372,3 +372,23 @@ select:hover {
   color: var(--text-muted);
   font-size: 11px;
 }
+.input-help,
+.input-error {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+.input-help {
+  color: var(--text-secondary);
+}
+
+.input-error {
+  color: var(--danger-red);
+}
+
+input[aria-invalid="true"],
+select[aria-invalid="true"],
+textarea[aria-invalid="true"] {
+  border-color: var(--danger-red);
+}
