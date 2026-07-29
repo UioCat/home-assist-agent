@@ -126,11 +126,16 @@ async def test_audit_failure_is_fail_closed_before_provider_write(
     await runtime.startup()
     try:
         light_id = await _device_id(runtime, "Desk light")
-
-        async def fail_audit(*args: Any, **kwargs: Any) -> None:
-            raise OSError("database became read-only")
-
-        runtime.container.operations.create_operation = fail_audit
+        async with runtime.container.engine.begin() as connection:
+            await connection.exec_driver_sql(
+                """
+                CREATE TRIGGER fail_control_operation_insert
+                BEFORE INSERT ON control_operations
+                BEGIN
+                    SELECT RAISE(ABORT, 'audit unavailable');
+                END
+                """
+            )
         async with AsyncClient(
             transport=ASGITransport(app=runtime.http_app),
             base_url="https://iot-mcp.test",
@@ -146,6 +151,7 @@ async def test_audit_failure_is_fail_closed_before_provider_write(
 
         assert response.status_code == 503
         assert response.json()["error"]["code"] == "audit_unavailable"
+        assert await runtime.container.operations.list_operations() == []
         assert provider.write_attempts == 0
     finally:
         await runtime.shutdown()

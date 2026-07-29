@@ -181,7 +181,7 @@ npm run test -- --run
 npm run build
 ```
 
-E2E 会通过真实应用容器、临时 SQLite、Mock Provider、HTTP/MCP tool surface 和构建后的 `web/dist` 验证控制链。若从干净工作树单独运行 Backend E2E，请先执行 `cd ../web && npm ci && npm run build`。
+Backend E2E 会通过真实应用容器、临时 SQLite、Mock Provider、HTTP/MCP tool surface 和测试内生成的确定性 build-like Web artifact 验证控制链，因此干净工作树可以先独立运行 Backend 全量测试，不依赖 `web/dist`、Node 或 npm。`npm run build` 是生产 Web 构建产物的独立门禁。
 
 无常驻进程的 CLI 解析冒烟：
 

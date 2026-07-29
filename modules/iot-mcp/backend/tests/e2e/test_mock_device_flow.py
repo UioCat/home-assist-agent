@@ -32,10 +32,39 @@ class RecordingMockProvider(MockDeviceProvider):
         return await super().invoke_service(device_ref, service, inputs)
 
 
+def _build_like_web_dist(tmp_path: Path) -> Path:
+    """Create deterministic Vite-like output without requiring Node in pytest."""
+    dist = tmp_path / "web-dist"
+    assets = dist / "assets"
+    assets.mkdir(parents=True)
+    (assets / "index-a1b2c3d4.css").write_text(
+        "#root{min-height:100vh}",
+        encoding="utf-8",
+    )
+    (assets / "index-e5f6a7b8.js").write_text(
+        'const API_BASE="/api/v1";window.__IOT_MCP_API_BASE__=API_BASE;',
+        encoding="utf-8",
+    )
+    (dist / "index.html").write_text(
+        "\n".join(
+            (
+                "<!doctype html>",
+                '<html><head><link rel="stylesheet" '
+                'href="/assets/index-a1b2c3d4.css"></head>',
+                '<body><div id="root"></div>',
+                '<script type="module" src="/assets/index-e5f6a7b8.js"></script>',
+                "</body></html>",
+            )
+        ),
+        encoding="utf-8",
+    )
+    return dist
+
+
 async def test_built_console_and_http_surfaces_control_real_mock_state(
     tmp_path: Path,
 ) -> None:
-    web_dist = Path(__file__).resolve().parents[3] / "web" / "dist"
+    web_dist = _build_like_web_dist(tmp_path)
     provider = RecordingMockProvider()
     runtime = build_runtime(
         Settings(
@@ -72,11 +101,14 @@ async def test_built_console_and_http_surfaces_control_real_mock_state(
             index = await client.get("/")
             assert index.status_code == 200
             assert '<div id="root"></div>' in index.text
-            asset_path = re.search(r'(?:src|href)="(/assets/[^"]+)"', index.text)
-            assert asset_path is not None, "run `npm run build` before the backend E2E suite"
-            asset = await client.get(asset_path.group(1))
-            assert asset.status_code == 200
-            assert asset.content
+            asset_paths = re.findall(r'(?:src|href)="(/assets/[^"]+)"', index.text)
+            assert asset_paths == [
+                "/assets/index-a1b2c3d4.css",
+                "/assets/index-e5f6a7b8.js",
+            ]
+            assets = [await client.get(path) for path in asset_paths]
+            assert all(asset.status_code == 200 and asset.content for asset in assets)
+            assert 'API_BASE="/api/v1"' in assets[1].text
 
             deep_route = await client.get("/devices/a-deep-link")
             assert deep_route.status_code == 200
