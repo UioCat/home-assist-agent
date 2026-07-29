@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, String, UniqueConstraint, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
 
@@ -76,10 +76,18 @@ class ProviderDeviceBindingTable(Base):
     __tablename__ = "provider_device_bindings"
     __table_args__ = (
         UniqueConstraint("provider_type", "external_device_ref", name="uq_provider_external_ref"),
+        Index(
+            "uq_device_provider_binding",
+            "device_id",
+            "provider_id",
+            unique=True,
+            sqlite_where=text("provider_id IS NOT NULL"),
+        ),
     )
 
     binding_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     device_id: Mapped[str] = mapped_column(ForeignKey("device_instances.device_id"), index=True)
+    provider_id: Mapped[str | None] = mapped_column(String(255), index=True)
     provider_type: Mapped[str] = mapped_column(String(64), index=True)
     external_device_ref: Mapped[str] = mapped_column(String(512))
     binding_revision: Mapped[int] = mapped_column(Integer)
@@ -143,6 +151,11 @@ class ControlOperationTable(Base):
     initiator: Mapped[str] = mapped_column(String(255))
     interaction_mode: Mapped[str] = mapped_column(String(32))
     action: Mapped[dict[str, Any]] = mapped_column(JSON)
+    binding_id: Mapped[str | None] = mapped_column(String(36))
+    provider_id: Mapped[str | None] = mapped_column(String(255))
+    provider_type: Mapped[str | None] = mapped_column(String(64))
+    external_device_ref: Mapped[str | None] = mapped_column(String(512))
+    binding_revision: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(32), index=True)
     idempotency_key: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     provider_request: Mapped[dict[str, Any] | None] = mapped_column(JSON)
@@ -161,8 +174,21 @@ class ConfirmationRequestTable(Base):
     )
     action_hash: Mapped[str] = mapped_column(String(128))
     authorized_actor: Mapped[str] = mapped_column(String(255))
+    binding_id: Mapped[str | None] = mapped_column(String(36))
+    provider_id: Mapped[str | None] = mapped_column(String(255))
+    provider_type: Mapped[str | None] = mapped_column(String(64))
+    external_device_ref: Mapped[str | None] = mapped_column(String(512))
     binding_revision: Mapped[int] = mapped_column(Integer)
     expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), index=True)
     decision: Mapped[str] = mapped_column(String(32), index=True)
     decided_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class WebhookNonceTable(Base):
+    __tablename__ = "webhook_nonces"
+
+    nonce: Mapped[str] = mapped_column(String(255), primary_key=True)
+    signed_timestamp: Mapped[int] = mapped_column(Integer, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), index=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)

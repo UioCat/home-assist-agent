@@ -104,12 +104,32 @@ class ControlPolicy:
         )
 
 
+class BoundTarget(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    binding_id: str
+    provider_id: str
+    provider_type: str
+    external_device_ref: str
+    binding_revision: int = Field(ge=1)
+
+
 def canonical_action_hash(
-    device_id: str, action: ControlAction, *, binding_revision: int
+    device_id: str,
+    action: ControlAction,
+    *,
+    target: BoundTarget | None = None,
+    binding_revision: int | None = None,
 ) -> str:
+    if target is None and binding_revision is None:
+        raise ValueError("a bound target or binding revision is required")
     payload = {
         "device_id": device_id,
-        "binding_revision": binding_revision,
+        "target": (
+            target.model_dump(mode="json")
+            if target is not None
+            else {"binding_revision": binding_revision}
+        ),
         "action": action.model_dump(mode="json"),
     }
     encoded = json.dumps(

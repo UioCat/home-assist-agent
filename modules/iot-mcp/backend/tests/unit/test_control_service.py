@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import text
 
 from iot_mcp.adapters.outbound.mock.provider import MockDeviceProvider
 from iot_mcp.adapters.outbound.persistence.database import (
@@ -16,7 +17,7 @@ from iot_mcp.adapters.outbound.persistence.repositories import (
 from iot_mcp.application.confirmation_service import ConfirmationService
 from iot_mcp.application.control_service import ControlService
 from iot_mcp.application.policy import ControlAction, SafeControlError, TrustedPrincipal
-from iot_mcp.domain.enums import OperationStatus, RiskLevel
+from iot_mcp.domain.enums import ConfirmationDecision, OperationStatus, RiskLevel
 from iot_mcp.domain.models import DeviceInstance, ProviderDeviceBinding
 from iot_mcp.ports.device_provider import ProviderResult
 
@@ -273,4 +274,240 @@ async def test_audit_failure_is_fail_closed(tmp_path) -> None:
             idempotency_key="audit-down",
         )
     assert provider.calls == 0
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_approval_race_executes_only_persisted_binding_target(tmp_path) -> None:
+    engine, provider, devices, operations, confirmations, _, _ = await _services(
+        tmp_path, risk=RiskLevel.HIGH
+    )
+
+    class BindingChangingConfirmations:
+        def __getattr__(self, name):
+            return getattr(confirmations, name)
+
+        async def decide_pending(
+            self, confirmation_id, decision, *, decided_at=None, **conditions
+        ):
+            result = await confirmations.decide_pending(
+                confirmation_id,
+                decision,
+                decided_at=decided_at,
+                **conditions,
+            )
+            if result is not None and decision is ConfirmationDecision.APPROVED:
+                binding = await devices.get_primary_binding("device-1")
+                await devices.upsert_binding(
+                    binding.model_copy(
+                        update={
+                            "external_device_ref": "mock:light:desk",
+                            "binding_revision": binding.binding_revision + 1,
+                        }
+                    )
+                )
+            return result
+
+    racing_confirmations = BindingChangingConfirmations()
+    control = ControlService(
+        devices=devices,
+        operations=operations,
+        confirmations=racing_confirmations,
+        providers={provider.provider_id: provider},
+        confirmation_actor="owner",
+    )
+    confirmation_service = ConfirmationService(
+        devices=devices,
+        operations=operations,
+        confirmations=racing_confirmations,
+        control=control,
+    )
+    operation = await control.submit(
+        device_id="device-1",
+        action=ControlAction.properties({"LockState": "UNLOCK"}),
+        principal=TrustedPrincipal.mcp("race"),
+        idempotency_key="approval-race",
+    )
+    pending = await confirmations.get_by_operation(operation.operation_id)
+    assert pending is not None
+
+    approved = await confirmation_service.decide(
+        confirmation_id=pending.confirmation_id,
+        decision="approve",
+        actor="owner",
+        action_hash=pending.action_hash,
+    )
+
+    lock_state = await provider.read_state("mock:lock:front_door")
+    light_state = await provider.read_state("mock:light:desk")
+    assert approved.status is OperationStatus.SUCCEEDED
+    assert lock_state.values["LockState"] == "UNLOCK"
+    assert "LockState" not in light_state.values
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_control_selects_binding_matching_device_provider(tmp_path) -> None:
+    engine = create_database_engine(f"sqlite+aiosqlite:///{tmp_path / 'providers.db'}")
+    await initialize_database(engine)
+    sessions = create_session_factory(engine)
+    devices = DeviceRepository(sessions)
+    operations = OperationRepository(sessions)
+    confirmations = ConfirmationRepository(sessions)
+    provider = CountingProvider()
+    await devices.upsert_device(
+        DeviceInstance(
+            device_id="multi-provider",
+            provider_id="mock",
+            display_name="Multi-provider door",
+            risk_level=RiskLevel.HIGH,
+        )
+    )
+    await devices.upsert_binding(
+        ProviderDeviceBinding(
+            device_id="multi-provider",
+            provider_id="other",
+            provider_type="other",
+            external_device_ref="mock:light:desk",
+        )
+    )
+    expected = await devices.upsert_binding(
+        ProviderDeviceBinding(
+            device_id="multi-provider",
+            provider_id="mock",
+            provider_type="mock",
+            external_device_ref="mock:lock:front_door",
+        )
+    )
+    control = ControlService(
+        devices=devices,
+        operations=operations,
+        confirmations=confirmations,
+        providers={"mock": provider},
+        confirmation_actor="owner",
+    )
+
+    operation = await control.submit(
+        device_id="multi-provider",
+        action=ControlAction.properties({"LockState": "UNLOCK"}),
+        principal=TrustedPrincipal.web_session("owner"),
+        idempotency_key="provider-binding",
+    )
+
+    assert operation.status is OperationStatus.SUCCEEDED
+    assert operation.binding_id == expected.binding_id
+    assert (await provider.read_state("mock:lock:front_door")).values["LockState"] == "UNLOCK"
+    assert "LockState" not in (await provider.read_state("mock:light:desk")).values
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_upgrade_adds_safe_binding_and_nonce_schema(tmp_path) -> None:
+    engine = create_database_engine(f"sqlite+aiosqlite:///{tmp_path / 'upgrade.db'}")
+    await initialize_database(engine)
+    devices = DeviceRepository(create_session_factory(engine))
+    await devices.upsert_device(
+        DeviceInstance(
+            device_id="legacy-device",
+            provider_id="mock",
+            display_name="Legacy device",
+        )
+    )
+    await devices.upsert_binding(
+        ProviderDeviceBinding(
+            device_id="legacy-device",
+            provider_type="mock",
+            external_device_ref="mock:light:desk",
+        )
+    )
+    async with engine.begin() as connection:
+        await connection.execute(text("DROP INDEX uq_device_provider_binding"))
+        await connection.execute(text("DROP INDEX ix_provider_device_bindings_provider_id"))
+        await connection.execute(
+            text("ALTER TABLE provider_device_bindings DROP COLUMN provider_id")
+        )
+        for table, columns in {
+            "control_operations": (
+                "binding_id",
+                "provider_id",
+                "provider_type",
+                "external_device_ref",
+                "binding_revision",
+            ),
+            "confirmation_requests": (
+                "binding_id",
+                "provider_id",
+                "provider_type",
+                "external_device_ref",
+            ),
+        }.items():
+            for column in columns:
+                await connection.execute(
+                    text(f"ALTER TABLE {table} DROP COLUMN {column}")
+                )
+        await connection.execute(text("DROP TABLE webhook_nonces"))
+
+    await initialize_database(engine)
+
+    async with engine.connect() as connection:
+        binding_columns = {
+            row[1]
+            for row in (
+                await connection.execute(text("PRAGMA table_info(provider_device_bindings)"))
+            ).all()
+        }
+        operation_columns = {
+            row[1]
+            for row in (
+                await connection.execute(text("PRAGMA table_info(control_operations)"))
+            ).all()
+        }
+        confirmation_columns = {
+            row[1]
+            for row in (
+                await connection.execute(text("PRAGMA table_info(confirmation_requests)"))
+            ).all()
+        }
+        nonce_table = (
+            await connection.execute(
+                text(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type = 'table' AND name = 'webhook_nonces'"
+                )
+            )
+        ).scalar_one()
+        migrated_provider_id = (
+            await connection.execute(
+                text(
+                    "SELECT provider_id FROM provider_device_bindings "
+                    "WHERE device_id = 'legacy-device'"
+                )
+            )
+        ).scalar_one()
+        binding_indexes = {
+            row[1]: row[2]
+            for row in (
+                await connection.execute(
+                    text("PRAGMA index_list(provider_device_bindings)")
+                )
+            ).all()
+        }
+
+    assert "provider_id" in binding_columns
+    assert {
+        "binding_id",
+        "provider_id",
+        "provider_type",
+        "external_device_ref",
+        "binding_revision",
+    } <= operation_columns
+    assert {
+        "binding_id",
+        "provider_id",
+        "provider_type",
+        "external_device_ref",
+    } <= confirmation_columns
+    assert nonce_table == "webhook_nonces"
+    assert migrated_provider_id == "mock"
+    assert binding_indexes["uq_device_provider_binding"] == 1
     await engine.dispose()

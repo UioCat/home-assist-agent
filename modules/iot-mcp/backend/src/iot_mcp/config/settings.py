@@ -23,7 +23,6 @@ class Settings(BaseSettings):
     webhook_secret: str = Field(default_factory=lambda: secrets.token_urlsafe(32))
     webhook_send_url: str | None = None
     webhook_timestamp_tolerance_seconds: int = Field(default=300, gt=0)
-    webhook_nonce_ttl_seconds: int = Field(default=600, gt=0)
     allowed_confirmation_actors: set[str] = Field(
         default_factory=lambda: {"owner"}, min_length=1
     )

@@ -66,6 +66,7 @@ class DeviceSyncService:
             await self._devices.upsert_binding(
                 ProviderDeviceBinding(
                     device_id=instance.device_id,
+                    provider_id=inventory.provider_id,
                     provider_type=inventory.provider_type,
                     external_device_ref=discovered.external_ref,
                     route_data=discovered.metadata,

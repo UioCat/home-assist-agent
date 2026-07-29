@@ -183,3 +183,21 @@ async def test_error_shape_is_stable_and_does_not_echo_secret(settings) -> None:
         assert response.status_code == 401
         assert set(body["error"]) == {"code", "message", "retryable", "request_id"}
         assert "wrong-secret" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_router_404_and_405_use_stable_error_contract(settings) -> None:
+    async for _, client in _client(settings):
+        missing = await client.get("/api/v1/not-a-route")
+        wrong_method = await client.delete("/api/v1/devices")
+
+        assert missing.status_code == 404
+        assert missing.json()["error"]["code"] == "not_found"
+        assert set(missing.json()["error"]) == {
+            "code",
+            "message",
+            "retryable",
+            "request_id",
+        }
+        assert wrong_method.status_code == 405
+        assert wrong_method.json()["error"]["code"] == "method_not_allowed"

@@ -7,32 +7,18 @@ before JSON parsing so alternate serializations cannot change the signed data.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import hmac
 import json
 import time
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 
+from iot_mcp.adapters.outbound.persistence.repositories import WebhookNonceRepository
 from iot_mcp.application.policy import SafeControlError
-
-
-class AtomicNonceStore:
-    def __init__(self, ttl_seconds: int) -> None:
-        self._ttl_seconds = ttl_seconds
-        self._seen: dict[str, float] = {}
-        self._lock = asyncio.Lock()
-
-    async def consume(self, nonce: str, *, now: float) -> bool:
-        async with self._lock:
-            self._seen = {key: expiry for key, expiry in self._seen.items() if expiry > now}
-            if nonce in self._seen:
-                return False
-            self._seen[nonce] = now + self._ttl_seconds
-            return True
 
 
 class SignedWebhookMessageChannel:
@@ -41,18 +27,17 @@ class SignedWebhookMessageChannel:
         *,
         secret: str,
         allowed_actor_ids: set[str],
+        nonces: WebhookNonceRepository,
         timestamp_tolerance_seconds: int = 300,
-        nonce_ttl_seconds: int = 600,
         send_url: str | None = None,
         client: httpx.AsyncClient | None = None,
-        nonce_store: AtomicNonceStore | None = None,
     ) -> None:
         self._secret = secret.encode()
         self._allowed_actor_ids = allowed_actor_ids
         self._timestamp_tolerance_seconds = timestamp_tolerance_seconds
         self._send_url = send_url
         self._client = client
-        self._nonce_store = nonce_store or AtomicNonceStore(nonce_ttl_seconds)
+        self._nonces = nonces
 
     async def send_confirmation(self, payload: dict[str, Any]) -> None:
         await self._send("confirmation", payload)
@@ -92,7 +77,15 @@ class SignedWebhookMessageChannel:
             raise SafeControlError(
                 "webhook_signature_invalid", "webhook signature is invalid", status_code=401
             )
-        if not await self._nonce_store.consume(nonce, now=now):
+        expires_at = datetime.fromtimestamp(
+            timestamp + self._timestamp_tolerance_seconds, UTC
+        )
+        if not await self._nonces.consume(
+            nonce,
+            signed_timestamp=timestamp,
+            expires_at=expires_at,
+            now=datetime.fromtimestamp(now, UTC),
+        ):
             raise SafeControlError(
                 "webhook_replay", "webhook nonce was already used", status_code=409
             )

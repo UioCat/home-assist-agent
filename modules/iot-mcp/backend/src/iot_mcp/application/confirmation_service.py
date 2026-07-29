@@ -10,9 +10,19 @@ from iot_mcp.adapters.outbound.persistence.repositories import (
     OperationRepository,
 )
 from iot_mcp.application.control_service import ControlService
-from iot_mcp.application.policy import ControlAction, SafeControlError, canonical_action_hash
+from iot_mcp.application.policy import (
+    BoundTarget,
+    ControlAction,
+    SafeControlError,
+    canonical_action_hash,
+)
 from iot_mcp.domain.enums import ConfirmationDecision, OperationStatus
-from iot_mcp.domain.models import ControlOperation, utc_now
+from iot_mcp.domain.models import (
+    ConfirmationRequest,
+    ControlOperation,
+    ProviderDeviceBinding,
+    utc_now,
+)
 
 
 class ConfirmationService:
@@ -79,27 +89,32 @@ class ConfirmationService:
                 confirmation_id, operation, code="confirmation_rejected"
             )
 
-        binding = await self._devices.get_primary_binding(operation.device_id)
         action = ControlAction.model_validate(operation.action)
-        expected_hash = (
-            canonical_action_hash(
-                operation.device_id,
-                action,
-                binding_revision=binding.binding_revision,
+        target = _confirmed_target(operation, confirmation)
+        if target is None:
+            return await self._reject_bound_operation(
+                confirmation_id, operation, code="bound_target_missing"
             )
-            if binding is not None
-            else ""
+        binding = await self._devices.get_primary_binding(
+            operation.device_id, target.provider_id
         )
-        if (
-            binding is None
-            or binding.binding_revision != confirmation.binding_revision
-            or not hmac.compare_digest(expected_hash, confirmation.action_hash)
+        expected_hash = canonical_action_hash(
+            operation.device_id,
+            action,
+            target=target,
+        )
+        if not _binding_matches_target(binding, target) or not hmac.compare_digest(
+            expected_hash, confirmation.action_hash
         ):
             return await self._reject_bound_operation(
                 confirmation_id, operation, code="binding_changed"
             )
         decided = await self._confirmations.decide_pending(
-            confirmation_id, ConfirmationDecision.APPROVED
+            confirmation_id,
+            ConfirmationDecision.APPROVED,
+            expected_action_hash=confirmation.action_hash,
+            expected_binding_id=target.binding_id,
+            expected_binding_revision=target.binding_revision,
         )
         if decided is None:
             raise SafeControlError(
@@ -126,3 +141,33 @@ class ConfirmationService:
             status=OperationStatus.REJECTED,
             result={"code": code, "retryable": False},
         )
+
+
+def _confirmed_target(
+    operation: ControlOperation, confirmation: ConfirmationRequest
+) -> BoundTarget | None:
+    operation_values = {
+        "binding_id": operation.binding_id,
+        "provider_id": operation.provider_id,
+        "provider_type": operation.provider_type,
+        "external_device_ref": operation.external_device_ref,
+        "binding_revision": operation.binding_revision,
+    }
+    confirmation_values = {
+        key: getattr(confirmation, key, None) for key in operation_values
+    }
+    if (
+        any(value is None for value in operation_values.values())
+        or operation_values != confirmation_values
+    ):
+        return None
+    return BoundTarget.model_validate(operation_values)
+
+
+def _binding_matches_target(
+    binding: ProviderDeviceBinding | None, target: BoundTarget
+) -> bool:
+    return binding is not None and all(
+        getattr(binding, key, None) == value
+        for key, value in target.model_dump().items()
+    )

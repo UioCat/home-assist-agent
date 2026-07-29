@@ -72,6 +72,7 @@ class DeviceInstance(DomainModel):
 class ProviderDeviceBinding(DomainModel):
     binding_id: str = Field(default_factory=_new_id)
     device_id: str
+    provider_id: str | None = None
     provider_type: str = Field(min_length=1)
     external_device_ref: str = Field(min_length=1)
     binding_revision: int = Field(default=1, ge=1)
@@ -122,6 +123,11 @@ class ControlOperation(DomainModel):
     initiator: str = Field(min_length=1)
     interaction_mode: InteractionMode
     action: dict[str, Any]
+    binding_id: str | None = None
+    provider_id: str | None = None
+    provider_type: str | None = None
+    external_device_ref: str | None = None
+    binding_revision: int | None = Field(default=None, ge=1)
     status: OperationStatus = OperationStatus.REQUESTED
     idempotency_key: str = Field(min_length=1)
     provider_request: dict[str, Any] | None = None
@@ -136,6 +142,10 @@ class ConfirmationRequest(DomainModel):
     operation_id: str
     action_hash: str = Field(min_length=1)
     authorized_actor: str = Field(min_length=1)
+    binding_id: str | None = None
+    provider_id: str | None = None
+    provider_type: str | None = None
+    external_device_ref: str | None = None
     binding_revision: int = Field(default=1, ge=1)
     expires_at: datetime
     decision: ConfirmationDecision = ConfirmationDecision.PENDING

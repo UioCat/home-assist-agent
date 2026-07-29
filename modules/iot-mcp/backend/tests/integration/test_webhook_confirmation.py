@@ -11,7 +11,14 @@ from httpx import ASGITransport, AsyncClient
 
 from iot_mcp.adapters.inbound.http.app import create_app
 from iot_mcp.adapters.outbound.mock.provider import MockDeviceProvider
-from iot_mcp.adapters.outbound.webhook.channel import AtomicNonceStore
+from iot_mcp.adapters.outbound.persistence.database import (
+    create_database_engine,
+    create_session_factory,
+    initialize_database,
+)
+from iot_mcp.adapters.outbound.persistence.repositories import WebhookNonceRepository
+from iot_mcp.adapters.outbound.webhook.channel import SignedWebhookMessageChannel
+from iot_mcp.application.policy import SafeControlError
 from iot_mcp.config.settings import Settings
 from iot_mcp.domain.enums import RiskLevel
 from iot_mcp.domain.models import DeviceInstance, ProviderDeviceBinding
@@ -156,12 +163,47 @@ async def test_webhook_rejects_stale_timestamp_bad_actor_and_action_substitution
 
 
 @pytest.mark.asyncio
-async def test_nonce_consumption_is_atomic_under_concurrency() -> None:
-    store = AtomicNonceStore(ttl_seconds=60)
+async def test_nonce_consumption_is_durable_and_atomic_across_channel_instances(
+    tmp_path,
+) -> None:
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'nonces.db'}"
+    secret = "durable-webhook-secret"
+    body = b'{"actor":"owner"}'
+    headers = {
+        key.lower(): value
+        for key, value in _signed_headers(secret, body, nonce="durable-nonce").items()
+    }
+    engine = create_database_engine(database_url)
+    await initialize_database(engine)
+    sessions = create_session_factory(engine)
+    channels = [
+        SignedWebhookMessageChannel(
+            secret=secret,
+            allowed_actor_ids={"owner"},
+            nonces=WebhookNonceRepository(sessions),
+        )
+        for _ in range(20)
+    ]
 
     results = await asyncio.gather(
-        *(store.consume("same", now=time.time()) for _ in range(20))
+        *(channel.verify(body, headers) for channel in channels),
+        return_exceptions=True,
     )
 
-    assert results.count(True) == 1
-    assert results.count(False) == 19
+    assert sum(result is None for result in results) == 1
+    assert sum(
+        isinstance(result, SafeControlError) and result.code == "webhook_replay"
+        for result in results
+    ) == 19
+    await engine.dispose()
+
+    reopened = create_database_engine(database_url)
+    await initialize_database(reopened)
+    channel = SignedWebhookMessageChannel(
+        secret=secret,
+        allowed_actor_ids={"owner"},
+        nonces=WebhookNonceRepository(create_session_factory(reopened)),
+    )
+    with pytest.raises(SafeControlError, match="already used"):
+        await channel.verify(body, headers)
+    await reopened.dispose()

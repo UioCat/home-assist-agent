@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -19,6 +19,7 @@ from iot_mcp.adapters.outbound.persistence.tables import (
     ProviderDeviceBindingTable,
     ThingModelVersionTable,
     ThingProductTable,
+    WebhookNonceTable,
 )
 from iot_mcp.domain.enums import ConfirmationDecision, OperationStatus
 from iot_mcp.domain.models import (
@@ -133,26 +134,33 @@ class DeviceRepository:
             return [DeviceInstance.model_validate(row) for row in rows]
 
     async def upsert_binding(self, binding: ProviderDeviceBinding) -> ProviderDeviceBinding:
+        provider_id = binding.provider_id or binding.provider_type
         async with self._sessions() as session:
             row = await session.scalar(
                 select(ProviderDeviceBindingTable).where(
-                    ProviderDeviceBindingTable.provider_type == binding.provider_type,
-                    ProviderDeviceBindingTable.external_device_ref == binding.external_device_ref,
+                    ProviderDeviceBindingTable.device_id == binding.device_id,
+                    ProviderDeviceBindingTable.provider_id == provider_id,
                 )
             )
             if row is None:
                 row = await session.scalar(
                     select(ProviderDeviceBindingTable).where(
-                        ProviderDeviceBindingTable.device_id == binding.device_id,
                         ProviderDeviceBindingTable.provider_type == binding.provider_type,
+                        ProviderDeviceBindingTable.external_device_ref
+                        == binding.external_device_ref,
                     )
                 )
             if row is None:
-                row = ProviderDeviceBindingTable(**_values(binding))
+                values = _values(binding)
+                values["provider_id"] = provider_id
+                row = ProviderDeviceBindingTable(**values)
                 session.add(row)
             else:
                 route_changed = (
-                    row.external_device_ref != binding.external_device_ref
+                    row.device_id != binding.device_id
+                    or row.provider_id != provider_id
+                    or row.provider_type != binding.provider_type
+                    or row.external_device_ref != binding.external_device_ref
                     or row.route_data != binding.route_data
                 )
                 next_revision = max(
@@ -160,8 +168,14 @@ class DeviceRepository:
                     row.binding_revision + (1 if route_changed else 0),
                 )
                 for key, value in _values(binding).items():
-                    if key not in {"binding_id", "binding_revision", "created_at"}:
+                    if key not in {
+                        "binding_id",
+                        "provider_id",
+                        "binding_revision",
+                        "created_at",
+                    }:
                         setattr(row, key, value)
+                row.provider_id = provider_id
                 row.binding_revision = next_revision
             await session.commit()
             return ProviderDeviceBinding.model_validate(row)
@@ -171,13 +185,29 @@ class DeviceRepository:
             rows = await session.scalars(
                 select(ProviderDeviceBindingTable).where(
                     ProviderDeviceBindingTable.device_id == device_id
+                ).order_by(
+                    ProviderDeviceBindingTable.provider_id,
+                    ProviderDeviceBindingTable.binding_id,
                 )
             )
             return [ProviderDeviceBinding.model_validate(row) for row in rows]
 
-    async def get_primary_binding(self, device_id: str) -> ProviderDeviceBinding | None:
-        bindings = await self.list_bindings(device_id)
-        return bindings[0] if bindings else None
+    async def get_primary_binding(
+        self, device_id: str, provider_id: str | None = None
+    ) -> ProviderDeviceBinding | None:
+        if provider_id is None:
+            device = await self.get_device(device_id)
+            if device is None:
+                return None
+            provider_id = device.provider_id
+        async with self._sessions() as session:
+            row = await session.scalar(
+                select(ProviderDeviceBindingTable).where(
+                    ProviderDeviceBindingTable.device_id == device_id,
+                    ProviderDeviceBindingTable.provider_id == provider_id,
+                )
+            )
+            return ProviderDeviceBinding.model_validate(row) if row else None
 
     async def upsert_feature_binding(self, binding: FeatureBinding) -> FeatureBinding:
         async with self._sessions() as session:
@@ -366,17 +396,34 @@ class ConfirmationRepository:
         decision: ConfirmationDecision,
         *,
         decided_at: datetime | None = None,
+        expected_action_hash: str | None = None,
+        expected_binding_id: str | None = None,
+        expected_binding_revision: int | None = None,
     ) -> ConfirmationRequest | None:
         """Atomically transition a pending confirmation exactly once."""
         if decision is ConfirmationDecision.PENDING:
             raise ValueError("a confirmation decision cannot remain pending")
         async with self._sessions() as session:
+            conditions = [
+                ConfirmationRequestTable.confirmation_id == confirmation_id,
+                ConfirmationRequestTable.decision == ConfirmationDecision.PENDING.value,
+            ]
+            if expected_action_hash is not None:
+                conditions.append(
+                    ConfirmationRequestTable.action_hash == expected_action_hash
+                )
+            if expected_binding_id is not None:
+                conditions.append(
+                    ConfirmationRequestTable.binding_id == expected_binding_id
+                )
+            if expected_binding_revision is not None:
+                conditions.append(
+                    ConfirmationRequestTable.binding_revision
+                    == expected_binding_revision
+                )
             result = await session.execute(
                 update(ConfirmationRequestTable)
-                .where(
-                    ConfirmationRequestTable.confirmation_id == confirmation_id,
-                    ConfirmationRequestTable.decision == ConfirmationDecision.PENDING.value,
-                )
+                .where(*conditions)
                 .values(
                     decision=decision.value,
                     decided_at=decided_at or utc_now(),
@@ -387,3 +434,35 @@ class ConfirmationRepository:
                 return None
             row = await session.get(ConfirmationRequestTable, confirmation_id)
             return ConfirmationRequest.model_validate(row) if row else None
+
+
+class WebhookNonceRepository:
+    def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
+        self._sessions = sessions
+
+    async def consume(
+        self,
+        nonce: str,
+        *,
+        signed_timestamp: int,
+        expires_at: datetime,
+        now: datetime,
+    ) -> bool:
+        async with self._sessions() as session:
+            await session.execute(
+                delete(WebhookNonceTable).where(WebhookNonceTable.expires_at < now)
+            )
+            session.add(
+                WebhookNonceTable(
+                    nonce=nonce,
+                    signed_timestamp=signed_timestamp,
+                    expires_at=expires_at,
+                    created_at=now,
+                )
+            )
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                return False
+            return True

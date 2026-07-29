@@ -14,13 +14,19 @@ from iot_mcp.adapters.outbound.persistence.repositories import (
     ThingModelRepository,
 )
 from iot_mcp.application.policy import (
+    BoundTarget,
     ControlAction,
     ControlPolicy,
     SafeControlError,
     TrustedPrincipal,
     canonical_action_hash,
 )
-from iot_mcp.domain.enums import ModelStatus, OperationStatus, RiskLevel
+from iot_mcp.domain.enums import (
+    ConfirmationDecision,
+    ModelStatus,
+    OperationStatus,
+    RiskLevel,
+)
 from iot_mcp.domain.models import ConfirmationRequest, ControlOperation, utc_now
 from iot_mcp.domain.tsl import TslDocument, TslValidationError
 from iot_mcp.ports.device_provider import DeviceProvider, ProviderResult
@@ -75,19 +81,27 @@ class ControlService:
         device = await self._devices.get_device(device_id)
         if device is None:
             raise SafeControlError("target_not_found", "device was not found", status_code=404)
-        binding = await self._devices.get_primary_binding(device_id)
+        binding = await self._devices.get_primary_binding(device_id, device.provider_id)
         if binding is None:
             raise SafeControlError(
                 "binding_not_found", "device binding was not found", status_code=409
             )
         await self._validate_action(device_id, device.product_id, action)
         risk = await self._resolve_risk(device_id, device.risk_level, action)
+        target = BoundTarget(
+            binding_id=binding.binding_id,
+            provider_id=device.provider_id,
+            provider_type=binding.provider_type,
+            external_device_ref=binding.external_device_ref,
+            binding_revision=binding.binding_revision,
+        )
 
         proposed = ControlOperation(
             device_id=device_id,
             initiator=f"{principal.source}:{principal.actor_id}",
             interaction_mode=principal.mode,
             action=action.model_dump(mode="json"),
+            **target.model_dump(),
             idempotency_key=idempotency_key,
         )
         try:
@@ -104,7 +118,7 @@ class ControlService:
 
         if self._policy.requires_confirmation(principal=principal, risk=risk):
             action_hash = canonical_action_hash(
-                device_id, action, binding_revision=binding.binding_revision
+                device_id, action, target=target
             )
             try:
                 confirmation = await self._confirmations.create_request(
@@ -112,7 +126,7 @@ class ControlService:
                         operation_id=operation.operation_id,
                         action_hash=action_hash,
                         authorized_actor=self._confirmation_actor,
-                        binding_revision=binding.binding_revision,
+                        **target.model_dump(),
                         expires_at=utc_now()
                         + timedelta(seconds=self._confirmation_ttl_seconds),
                     )
@@ -131,7 +145,7 @@ class ControlService:
                 ) from error
             await self._notify_confirmation_safely(confirmation, action)
             return operation
-        return await self._execute(operation, binding.external_device_ref)
+        return await self._execute(operation)
 
     async def execute_approved(self, operation_id: str) -> ControlOperation:
         operation = await self._operations.get_operation(operation_id)
@@ -139,29 +153,41 @@ class ControlService:
             raise SafeControlError(
                 "operation_not_found", "operation was not found", status_code=404
             )
-        binding = await self._devices.get_primary_binding(operation.device_id)
-        if binding is None:
+        target = _operation_target(operation)
+        confirmation = await self._confirmations.get_by_operation(operation_id)
+        if (
+            target is None
+            or confirmation is None
+            or confirmation.decision is not ConfirmationDecision.APPROVED
+            or any(
+                getattr(confirmation, key) != value
+                for key, value in target.model_dump().items()
+            )
+        ):
             return await self._operations.update_operation(
                 operation.operation_id,
                 status=OperationStatus.REJECTED,
-                result={"code": "binding_not_found", "retryable": False},
+                result={"code": "approval_binding_invalid", "retryable": False},
             )
         operation = await self._operations.update_operation(
             operation.operation_id, status=OperationStatus.APPROVED
         )
-        return await self._execute(operation, binding.external_device_ref)
+        return await self._execute(operation)
 
-    async def _execute(
-        self, operation: ControlOperation, external_device_ref: str
-    ) -> ControlOperation:
-        provider = self._providers.get(
-            (await self._devices.get_device(operation.device_id)).provider_id  # type: ignore[union-attr]
-        )
-        if provider is None:
+    async def _execute(self, operation: ControlOperation) -> ControlOperation:
+        target = _operation_target(operation)
+        if target is None:
+            return await self._operations.update_operation(
+                operation.operation_id,
+                status=OperationStatus.REJECTED,
+                result={"code": "bound_target_missing", "retryable": False},
+            )
+        provider = self._providers.get(target.provider_id)
+        if provider is None or provider.provider_type != target.provider_type:
             return await self._operations.update_operation(
                 operation.operation_id,
                 status=OperationStatus.FAILED,
-                result={"code": "provider_not_found", "retryable": False},
+                result={"code": "provider_binding_mismatch", "retryable": False},
             )
         action = ControlAction.model_validate(operation.action)
         operation = await self._operations.update_operation(
@@ -172,7 +198,7 @@ class ControlService:
         try:
             if action.kind == "properties":
                 current = await provider.read_state(
-                    external_device_ref, list(action.values)
+                    target.external_device_ref, list(action.values)
                 )
                 if all(current.values.get(key) == value for key, value in action.values.items()):
                     return await self._operations.update_operation(
@@ -180,10 +206,12 @@ class ControlService:
                         status=OperationStatus.NO_OP,
                         result={"state": current.values},
                     )
-                result = await provider.write_properties(external_device_ref, action.values)
+                result = await provider.write_properties(
+                    target.external_device_ref, action.values
+                )
             else:
                 result = await provider.invoke_service(
-                    external_device_ref, action.service or "", action.inputs
+                    target.external_device_ref, action.service or "", action.inputs
                 )
         except TimeoutError:
             return await self._operations.update_operation(
@@ -335,3 +363,16 @@ def _redact(value: object) -> object:
     if isinstance(value, list):
         return [_redact(item) for item in value]
     return value
+
+
+def _operation_target(operation: ControlOperation) -> BoundTarget | None:
+    values = {
+        "binding_id": operation.binding_id,
+        "provider_id": operation.provider_id,
+        "provider_type": operation.provider_type,
+        "external_device_ref": operation.external_device_ref,
+        "binding_revision": operation.binding_revision,
+    }
+    if any(value is None for value in values.values()):
+        return None
+    return BoundTarget.model_validate(values)

@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from iot_mcp.adapters.inbound.http.routes import router
 from iot_mcp.adapters.outbound.mock.provider import MockDeviceProvider
@@ -24,6 +25,7 @@ from iot_mcp.adapters.outbound.persistence.repositories import (
     OperationRepository,
     StateRepository,
     ThingModelRepository,
+    WebhookNonceRepository,
 )
 from iot_mcp.adapters.outbound.webhook.channel import SignedWebhookMessageChannel
 from iot_mcp.application.confirmation_service import ConfirmationService
@@ -58,11 +60,12 @@ def create_app(
     app.state.states = StateRepository(sessions)
     app.state.operations = OperationRepository(sessions)
     app.state.confirmations = ConfirmationRepository(sessions)
+    app.state.webhook_nonces = WebhookNonceRepository(sessions)
     app.state.webhook_channel = SignedWebhookMessageChannel(
         secret=settings.webhook_secret,
         allowed_actor_ids=settings.allowed_confirmation_actors,
+        nonces=app.state.webhook_nonces,
         timestamp_tolerance_seconds=settings.webhook_timestamp_tolerance_seconds,
-        nonce_ttl_seconds=settings.webhook_nonce_ttl_seconds,
         send_url=settings.webhook_send_url,
     )
     confirmation_actor = sorted(settings.allowed_confirmation_actors)[0]
@@ -117,6 +120,26 @@ def create_app(
             status_code=422,
             code="invalid_request",
             message="request validation failed",
+            retryable=False,
+        )
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error_handler(
+        request: Request, error: StarletteHTTPException
+    ) -> JSONResponse:
+        code = {
+            404: "not_found",
+            405: "method_not_allowed",
+        }.get(error.status_code, "http_error")
+        message = {
+            404: "resource was not found",
+            405: "method is not allowed",
+        }.get(error.status_code, "HTTP request failed")
+        return _error_response(
+            request,
+            status_code=error.status_code,
+            code=code,
+            message=message,
             retryable=False,
         )
 

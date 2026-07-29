@@ -40,7 +40,7 @@ class QueryService:
 
     async def read_state(self, device_id: str) -> DeviceState:
         device = await self.get_device(device_id)
-        binding = await self._devices.get_primary_binding(device_id)
+        binding = await self._devices.get_primary_binding(device_id, device.provider_id)
         provider = self._providers.get(device.provider_id)
         if binding is None or provider is None:
             raise SafeControlError(
