@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -38,6 +38,16 @@ async def initialize_database(engine: AsyncEngine) -> None:
     """Create the schema after the connection pragmas have been applied."""
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
+        if engine.dialect.name == "sqlite":
+            columns = await connection.execute(text("PRAGMA table_info(confirmation_requests)"))
+            column_rows = columns.all()
+            if column_rows and "binding_revision" not in {row[1] for row in column_rows}:
+                await connection.execute(
+                    text(
+                        "ALTER TABLE confirmation_requests "
+                        "ADD COLUMN binding_revision INTEGER NOT NULL DEFAULT 1"
+                    )
+                )
 
 
 async def session_scope(

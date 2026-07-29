@@ -136,6 +136,7 @@ class ConfirmationRequest(DomainModel):
     operation_id: str
     action_hash: str = Field(min_length=1)
     authorized_actor: str = Field(min_length=1)
+    binding_revision: int = Field(default=1, ge=1)
     expires_at: datetime
     decision: ConfirmationDecision = ConfirmationDecision.PENDING
     decided_at: datetime | None = None

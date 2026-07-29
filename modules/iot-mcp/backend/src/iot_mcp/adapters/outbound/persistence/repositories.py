@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -75,6 +75,13 @@ class ThingModelRepository:
             )
             return ThingProduct.model_validate(row) if row else None
 
+    async def list_products(self) -> list[ThingProduct]:
+        async with self._sessions() as session:
+            rows = await session.scalars(
+                select(ThingProductTable).order_by(ThingProductTable.name)
+            )
+            return [ThingProduct.model_validate(row) for row in rows]
+
     async def add_model_version(self, model: ThingModelVersion) -> ThingModelVersion:
         async with self._sessions() as session:
             session.add(ThingModelVersionTable(**_values(model)))
@@ -134,12 +141,28 @@ class DeviceRepository:
                 )
             )
             if row is None:
+                row = await session.scalar(
+                    select(ProviderDeviceBindingTable).where(
+                        ProviderDeviceBindingTable.device_id == binding.device_id,
+                        ProviderDeviceBindingTable.provider_type == binding.provider_type,
+                    )
+                )
+            if row is None:
                 row = ProviderDeviceBindingTable(**_values(binding))
                 session.add(row)
             else:
+                route_changed = (
+                    row.external_device_ref != binding.external_device_ref
+                    or row.route_data != binding.route_data
+                )
+                next_revision = max(
+                    binding.binding_revision,
+                    row.binding_revision + (1 if route_changed else 0),
+                )
                 for key, value in _values(binding).items():
-                    if key not in {"binding_id", "created_at"}:
+                    if key not in {"binding_id", "binding_revision", "created_at"}:
                         setattr(row, key, value)
+                row.binding_revision = next_revision
             await session.commit()
             return ProviderDeviceBinding.model_validate(row)
 
@@ -151,6 +174,10 @@ class DeviceRepository:
                 )
             )
             return [ProviderDeviceBinding.model_validate(row) for row in rows]
+
+    async def get_primary_binding(self, device_id: str) -> ProviderDeviceBinding | None:
+        bindings = await self.list_bindings(device_id)
+        return bindings[0] if bindings else None
 
     async def upsert_feature_binding(self, binding: FeatureBinding) -> FeatureBinding:
         async with self._sessions() as session:
@@ -170,6 +197,13 @@ class DeviceRepository:
                         setattr(row, key, value)
             await session.commit()
             return FeatureBinding.model_validate(row)
+
+    async def list_feature_bindings(self, device_id: str) -> list[FeatureBinding]:
+        async with self._sessions() as session:
+            rows = await session.scalars(
+                select(FeatureBindingTable).where(FeatureBindingTable.device_id == device_id)
+            )
+            return [FeatureBinding.model_validate(row) for row in rows]
 
 
 class StateRepository:
@@ -250,6 +284,15 @@ class OperationRepository:
             row = await session.get(ControlOperationTable, operation_id)
             return ControlOperation.model_validate(row) if row else None
 
+    async def list_operations(self, *, limit: int = 100) -> list[ControlOperation]:
+        async with self._sessions() as session:
+            rows = await session.scalars(
+                select(ControlOperationTable)
+                .order_by(ControlOperationTable.created_at.desc())
+                .limit(limit)
+            )
+            return [ControlOperation.model_validate(row) for row in rows]
+
     async def update_operation(
         self,
         operation_id: str,
@@ -316,3 +359,31 @@ class ConfirmationRepository:
             row.decided_at = decided_at or utc_now()
             await session.commit()
             return ConfirmationRequest.model_validate(row)
+
+    async def decide_pending(
+        self,
+        confirmation_id: str,
+        decision: ConfirmationDecision,
+        *,
+        decided_at: datetime | None = None,
+    ) -> ConfirmationRequest | None:
+        """Atomically transition a pending confirmation exactly once."""
+        if decision is ConfirmationDecision.PENDING:
+            raise ValueError("a confirmation decision cannot remain pending")
+        async with self._sessions() as session:
+            result = await session.execute(
+                update(ConfirmationRequestTable)
+                .where(
+                    ConfirmationRequestTable.confirmation_id == confirmation_id,
+                    ConfirmationRequestTable.decision == ConfirmationDecision.PENDING.value,
+                )
+                .values(
+                    decision=decision.value,
+                    decided_at=decided_at or utc_now(),
+                )
+            )
+            await session.commit()
+            if result.rowcount != 1:
+                return None
+            row = await session.get(ConfirmationRequestTable, confirmation_id)
+            return ConfirmationRequest.model_validate(row) if row else None

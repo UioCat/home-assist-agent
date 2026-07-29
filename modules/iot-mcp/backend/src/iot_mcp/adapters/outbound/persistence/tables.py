@@ -161,6 +161,7 @@ class ConfirmationRequestTable(Base):
     )
     action_hash: Mapped[str] = mapped_column(String(128))
     authorized_actor: Mapped[str] = mapped_column(String(255))
+    binding_revision: Mapped[int] = mapped_column(Integer)
     expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), index=True)
     decision: Mapped[str] = mapped_column(String(32), index=True)
     decided_at: Mapped[datetime | None] = mapped_column(UTCDateTime())

@@ -146,13 +146,43 @@ class DeviceSyncService:
 
 
 def _generated_tsl(device: ProviderDevice) -> dict[str, object]:
+    bindings = {
+        binding["identifier"]: binding for binding in device.feature_bindings
+    }
+    identifiers = sorted(set(bindings) | set(device.state.values))
     return {
         "schema": "https://iotx-tsl.aliyuncs.com/schema.json",
         "profile": {"productKey": device.product_key},
         "properties": [
-            {"identifier": binding["identifier"], "name": binding["identifier"]}
-            for binding in device.feature_bindings
+            {
+                "identifier": identifier,
+                "name": identifier,
+                "accessMode": (
+                    "rw"
+                    if bindings.get(identifier, {}).get("write_binding") is not None
+                    or identifier in device.state.values
+                    and identifier != "CurrentTemperature"
+                    else "r"
+                ),
+                "dataType": _inferred_data_type(
+                    identifier, device.state.values.get(identifier)
+                ),
+            }
+            for identifier in identifiers
         ],
         "services": [],
         "events": [],
     }
+
+
+def _inferred_data_type(identifier: str, value: object) -> dict[str, object]:
+    if isinstance(value, bool):
+        return {"type": "bool", "specs": {}}
+    if isinstance(value, int):
+        specs = {"min": 0, "max": 100} if identifier == "Brightness" else {}
+        return {"type": "int", "specs": specs}
+    if isinstance(value, float):
+        return {"type": "double", "specs": {}}
+    if identifier == "LockState":
+        return {"type": "enum", "specs": {"LOCK": "Locked", "UNLOCK": "Unlocked"}}
+    return {"type": "text", "specs": {"length": 4096}}
