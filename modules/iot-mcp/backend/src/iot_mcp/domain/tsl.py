@@ -25,30 +25,45 @@ class TslDataType(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     type: DataType
-    specs: dict[str, Any] = Field(default_factory=dict)
+    specs: dict[str, Any] | list[dict[str, Any]] = Field(default_factory=dict)
 
     @model_validator(mode="before")
     @classmethod
     def normalize_shorthand(cls, value: Any) -> Any:
         if isinstance(value, str):
             return {"type": value, "specs": {}}
+        if (
+            isinstance(value, dict)
+            and value.get("type") == DataType.STRUCT
+            and isinstance(value.get("specs"), dict)
+            and isinstance(value["specs"].get("fields"), list)
+        ):
+            # Accept the original local wrapper but retain the standard array representation.
+            return {**value, "specs": value["specs"]["fields"]}
         return value
 
     @model_validator(mode="after")
     def validate_specs(self) -> TslDataType:
-        if not isinstance(self.specs, dict):
-            raise ValueError("dataType.specs must be an object")
         if self.type in {DataType.INT, DataType.FLOAT, DataType.DOUBLE}:
+            self._require_object_specs()
             self._validate_numeric_specs()
         elif self.type is DataType.TEXT:
+            self._require_object_specs()
             self._validate_text_specs()
         elif self.type is DataType.ENUM:
+            self._require_object_specs()
             self._validate_enum_specs()
         elif self.type is DataType.STRUCT:
             self._validate_struct_specs()
         elif self.type is DataType.ARRAY:
+            self._require_object_specs()
             self._validate_array_specs()
         return self
+
+    def _require_object_specs(self) -> dict[str, Any]:
+        if not isinstance(self.specs, dict):
+            raise ValueError(f"{self.type}.specs must be an object")
+        return self.specs
 
     def _validate_numeric_specs(self) -> None:
         for key in ("min", "max", "step"):
@@ -78,9 +93,7 @@ class TslDataType(BaseModel):
             raise ValueError("enum.specs keys must be strings")
 
     def _validate_struct_specs(self) -> None:
-        fields = self.specs.get("fields")
-        if not isinstance(fields, list) or not fields:
-            raise ValueError("struct dataType requires specs.fields")
+        fields = self._struct_fields()
         identifiers: set[str] = set()
         for field in fields:
             if not isinstance(field, dict) or not isinstance(field.get("identifier"), str):
@@ -95,6 +108,11 @@ class TslDataType(BaseModel):
                 raise ValueError(f"invalid dataType for struct field {identifier}") from error
             if "required" in field and not isinstance(field["required"], bool):
                 raise ValueError(f"struct field {identifier}.required must be boolean")
+
+    def _struct_fields(self) -> list[dict[str, Any]]:
+        if not isinstance(self.specs, list) or not self.specs:
+            raise ValueError("struct dataType requires specs as a non-empty field array")
+        return self.specs
 
     def _validate_array_specs(self) -> None:
         item = self.specs.get("item")
@@ -165,7 +183,7 @@ class TslDataType(BaseModel):
     def _validate_struct_value(self, value: Any) -> None:
         if not isinstance(value, dict):
             raise TslValidationError("expected struct object")
-        fields = self.specs["fields"]
+        fields = self._struct_fields()
         declared = {field["identifier"]: field for field in fields}
         unknown = set(value) - set(declared)
         if unknown:

@@ -39,6 +39,9 @@ def _values(model: Any) -> dict[str, Any]:
     return model.model_dump(mode="python")
 
 
+_UNSET = object()
+
+
 class ThingModelRepository:
     def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
         self._sessions = sessions
@@ -252,18 +255,21 @@ class OperationRepository:
         operation_id: str,
         *,
         status: OperationStatus,
-        provider_request: dict[str, Any] | None = None,
-        provider_result: dict[str, Any] | None = None,
-        result: dict[str, Any] | None = None,
+        provider_request: dict[str, Any] | None | object = _UNSET,
+        provider_result: dict[str, Any] | None | object = _UNSET,
+        result: dict[str, Any] | None | object = _UNSET,
     ) -> ControlOperation:
         async with self._sessions() as session:
             row = await session.get(ControlOperationTable, operation_id)
             if row is None:
                 raise KeyError(f"unknown operation: {operation_id}")
             row.status = status.value
-            row.provider_request = provider_request
-            row.provider_result = provider_result
-            row.result = result
+            if provider_request is not _UNSET:
+                row.provider_request = provider_request
+            if provider_result is not _UNSET:
+                row.provider_result = provider_result
+            if result is not _UNSET:
+                row.result = result
             row.updated_at = utc_now()
             await session.commit()
             return ControlOperation.model_validate(row)

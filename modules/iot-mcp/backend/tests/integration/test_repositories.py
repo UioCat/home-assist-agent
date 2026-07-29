@@ -94,6 +94,8 @@ async def test_repositories_persist_structured_domain_records_and_idempotency(tm
         interaction_mode=InteractionMode.AUTONOMOUS,
         action={"kind": "set_properties", "values": {"brightness": 50}},
         idempotency_key="request-123",
+        provider_request={"service": "turn_on"},
+        provider_result={"accepted": True},
     )
     created = await operation_repo.create_operation(operation)
     duplicate = await operation_repo.create_operation(
@@ -120,6 +122,15 @@ async def test_repositories_persist_structured_domain_records_and_idempotency(tm
     persisted_operation = await operation_repo.get_by_idempotency_key("request-123")
     assert persisted_operation is not None
     assert persisted_operation.status is OperationStatus.REQUESTED
+    completed = await operation_repo.update_operation(
+        created.operation_id, status=OperationStatus.SUCCEEDED
+    )
+    assert completed.provider_request == {"service": "turn_on"}
+    assert completed.provider_result == {"accepted": True}
+    cleared = await operation_repo.update_operation(
+        created.operation_id, status=OperationStatus.SUCCEEDED, provider_request=None
+    )
+    assert cleared.provider_request is None
 
     async with engine.connect() as connection:
         journal_mode = (await connection.execute(text("PRAGMA journal_mode"))).scalar_one()

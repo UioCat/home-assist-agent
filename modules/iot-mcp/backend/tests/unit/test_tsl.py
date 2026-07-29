@@ -23,15 +23,13 @@ def _document() -> dict:
                 "accessMode": "rw",
                 "dataType": {
                     "type": "struct",
-                    "specs": {
-                        "fields": [
-                            {
-                                "identifier": "label",
-                                "required": True,
-                                "dataType": {"type": "text", "specs": {"length": 20}},
-                            }
-                        ]
-                    },
+                    "specs": [
+                        {
+                            "identifier": "label",
+                            "required": True,
+                            "dataType": {"type": "text", "specs": {"length": 20}},
+                        }
+                    ],
                 },
             },
         ],
@@ -69,6 +67,14 @@ def _document() -> dict:
 def test_tsl_validates_writes_service_inputs_and_struct_fields() -> None:
     tsl = TslDocument.model_validate(_document())
 
+    assert isinstance(tsl.properties[1].data_type.specs, list)
+    assert tsl.model_dump(by_alias=True)["properties"][1]["dataType"]["specs"] == [
+        {
+            "identifier": "label",
+            "required": True,
+            "dataType": {"type": "text", "specs": {"length": 20}},
+        }
+    ]
     tsl.validate_property_write("brightness", 55)
     tsl.validate_property_write("metadata", {"label": "living room"})
     tsl.validate_service_inputs("flash", {"seconds": 1.5})
