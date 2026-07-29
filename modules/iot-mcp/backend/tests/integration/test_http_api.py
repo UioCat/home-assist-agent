@@ -173,6 +173,66 @@ async def test_web_session_can_approve_only_the_original_bound_action(settings) 
 
 
 @pytest.mark.asyncio
+async def test_web_console_read_contract_exposes_operational_collections(settings) -> None:
+    async for app, client in _client(settings):
+        login = await client.post(
+            "/api/v1/auth/session",
+            headers={"Authorization": "Bearer admin-secret"},
+        )
+        csrf = login.json()["csrf_token"]
+        pending = await client.post(
+            "/api/v1/devices/door/properties:write",
+            headers={
+                "Authorization": "Bearer machine-secret",
+                "Idempotency-Key": "console-pending",
+            },
+            json={"values": {"LockState": "UNLOCK"}},
+        )
+        confirmation_id = pending.json()["result"]["confirmation_id"]
+
+        operations = await client.get("/api/v1/operations")
+        confirmations = await client.get("/api/v1/confirmations?decision=pending")
+        events = await client.get("/api/v1/device-events?device_id=door")
+        providers = await client.get("/api/v1/providers")
+        channels = await client.get("/api/v1/message-channels")
+        device = await client.get("/api/v1/devices/door")
+
+        assert operations.status_code == 200
+        assert operations.json()[0]["operation_id"] == pending.json()["operation_id"]
+        assert confirmations.status_code == 200
+        assert confirmations.json()[0]["confirmation"]["confirmation_id"] == confirmation_id
+        assert confirmations.json()[0]["operation"]["initiator"] == "machine_token:agent"
+        assert events.status_code == 200
+        assert events.json() == []
+        assert providers.status_code == 200
+        assert providers.json() == [
+            {
+                "provider_id": "mock",
+                "provider_type": "mock",
+                "status": "healthy",
+                "detail": None,
+            }
+        ]
+        assert channels.status_code == 200
+        assert channels.json() == [
+            {
+                "channel_id": "signed-webhook",
+                "status": "not_configured",
+                "callback_path": "/api/v1/message-channels/signed-webhook/callbacks",
+                "allowed_actor_count": 1,
+            }
+        ]
+        assert device.status_code == 200
+        assert set(device.json()) == {
+            "device",
+            "bindings",
+            "feature_bindings",
+            "model_versions",
+        }
+        assert csrf
+
+
+@pytest.mark.asyncio
 async def test_error_shape_is_stable_and_does_not_echo_secret(settings) -> None:
     async for _, client in _client(settings):
         response = await client.get(

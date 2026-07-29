@@ -267,13 +267,15 @@ class StateRepository:
             await session.commit()
             return event
 
-    async def list_events(self, device_id: str, *, limit: int = 100) -> list[DeviceEvent]:
+    async def list_events(
+        self, device_id: str | None = None, *, limit: int = 100
+    ) -> list[DeviceEvent]:
         async with self._sessions() as session:
+            statement = select(DeviceEventTable)
+            if device_id is not None:
+                statement = statement.where(DeviceEventTable.device_id == device_id)
             rows = await session.scalars(
-                select(DeviceEventTable)
-                .where(DeviceEventTable.device_id == device_id)
-                .order_by(DeviceEventTable.occurred_at.desc())
-                .limit(limit)
+                statement.order_by(DeviceEventTable.occurred_at.desc()).limit(limit)
             )
             return [DeviceEvent.model_validate(row) for row in rows]
 
@@ -371,6 +373,21 @@ class ConfirmationRepository:
                 )
             )
             return ConfirmationRequest.model_validate(row) if row else None
+
+    async def list_requests(
+        self,
+        *,
+        decision: ConfirmationDecision | None = None,
+        limit: int = 100,
+    ) -> list[ConfirmationRequest]:
+        async with self._sessions() as session:
+            statement = select(ConfirmationRequestTable)
+            if decision is not None:
+                statement = statement.where(ConfirmationRequestTable.decision == decision.value)
+            rows = await session.scalars(
+                statement.order_by(ConfirmationRequestTable.created_at.desc()).limit(limit)
+            )
+            return [ConfirmationRequest.model_validate(row) for row in rows]
 
     async def decide(
         self,

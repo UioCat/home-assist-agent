@@ -24,7 +24,7 @@ from iot_mcp.adapters.inbound.http.schemas import (
 )
 from iot_mcp.application.policy import ControlAction, SafeControlError, TrustedPrincipal
 from iot_mcp.application.sync_service import DeviceSyncService
-from iot_mcp.domain.enums import ModelStatus, OperationStatus
+from iot_mcp.domain.enums import ConfirmationDecision, ModelStatus, OperationStatus
 from iot_mcp.domain.models import ThingModelVersion, ThingProduct
 from iot_mcp.domain.tsl import TslDocument
 
@@ -117,6 +117,16 @@ async def get_thing_model(
     return model.model_dump(mode="json")
 
 
+@router.get("/thing-models/{product_id}/versions")
+async def list_thing_model_versions(
+    product_id: str,
+    request: Request,
+    _: TrustedPrincipal = Depends(authenticated),
+) -> list[dict[str, Any]]:
+    models = await request.app.state.models.list_model_versions(product_id)
+    return [model.model_dump(mode="json") for model in models]
+
+
 @router.post("/thing-models/{model_id}:validate")
 async def validate_thing_model(
     model_id: str,
@@ -148,9 +158,17 @@ async def get_device(
 ) -> dict[str, Any]:
     device = await request.app.state.queries.get_device(device_id)
     bindings = await request.app.state.devices.list_bindings(device_id)
+    feature_bindings = await request.app.state.devices.list_feature_bindings(device_id)
+    models = (
+        await request.app.state.models.list_model_versions(device.product_id)
+        if device.product_id
+        else []
+    )
     return {
         "device": device.model_dump(mode="json"),
         "bindings": [binding.model_dump(mode="json") for binding in bindings],
+        "feature_bindings": [binding.model_dump(mode="json") for binding in feature_bindings],
+        "model_versions": [model.model_dump(mode="json") for model in models],
     }
 
 
@@ -203,6 +221,14 @@ async def invoke_service(
     return operation.model_dump(mode="json")
 
 
+@router.get("/operations")
+async def list_operations(
+    request: Request, _: TrustedPrincipal = Depends(authenticated)
+) -> list[dict[str, Any]]:
+    operations = await request.app.state.operations.list_operations()
+    return [operation.model_dump(mode="json") for operation in operations]
+
+
 @router.get("/operations/{operation_id}")
 async def get_operation(
     operation_id: str,
@@ -211,6 +237,25 @@ async def get_operation(
 ) -> dict[str, Any]:
     operation = await request.app.state.queries.get_operation(operation_id)
     return operation.model_dump(mode="json")
+
+
+@router.get("/confirmations")
+async def list_confirmations(
+    request: Request,
+    decision: ConfirmationDecision | None = None,
+    _: TrustedPrincipal = Depends(authenticated),
+) -> list[dict[str, Any]]:
+    confirmations = await request.app.state.confirmations.list_requests(decision=decision)
+    result: list[dict[str, Any]] = []
+    for confirmation in confirmations:
+        operation = await request.app.state.operations.get_operation(confirmation.operation_id)
+        result.append(
+            {
+                "confirmation": confirmation.model_dump(mode="json"),
+                "operation": operation.model_dump(mode="json") if operation else None,
+            }
+        )
+    return result
 
 
 @router.post("/confirmations/{confirmation_id}:approve")
@@ -243,6 +288,56 @@ async def reject_confirmation(
         action_hash=payload.action_hash,
     )
     return operation.model_dump(mode="json")
+
+
+@router.get("/device-events")
+async def list_device_events(
+    request: Request,
+    device_id: str | None = None,
+    _: TrustedPrincipal = Depends(authenticated),
+) -> list[dict[str, Any]]:
+    events = await request.app.state.states.list_events(device_id)
+    return [event.model_dump(mode="json") for event in events]
+
+
+@router.get("/providers")
+async def list_providers(
+    request: Request, _: TrustedPrincipal = Depends(authenticated)
+) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for provider_id, provider in sorted(request.app.state.providers.items()):
+        try:
+            health = await provider.health()
+        except Exception:
+            status = request.app.state.provider_status.get(provider_id, "unavailable")
+            detail = "provider health check failed"
+        else:
+            status = health.status
+            detail = health.detail
+        result.append(
+            {
+                "provider_id": provider_id,
+                "provider_type": provider.provider_type,
+                "status": status,
+                "detail": detail,
+            }
+        )
+    return result
+
+
+@router.get("/message-channels")
+async def list_message_channels(
+    request: Request, _: TrustedPrincipal = Depends(authenticated)
+) -> list[dict[str, Any]]:
+    settings = request.app.state.settings
+    return [
+        {
+            "channel_id": "signed-webhook",
+            "status": "configured" if settings.webhook_send_url else "not_configured",
+            "callback_path": "/api/v1/message-channels/signed-webhook/callbacks",
+            "allowed_actor_count": len(settings.allowed_confirmation_actors),
+        }
+    ]
 
 
 @router.post("/message-channels/{channel}/callbacks")
