@@ -3,35 +3,19 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from iot_mcp.adapters.inbound.http.routes import router
-from iot_mcp.adapters.outbound.mock.provider import MockDeviceProvider
-from iot_mcp.adapters.outbound.persistence.database import (
-    create_database_engine,
-    create_session_factory,
-    initialize_database,
-)
-from iot_mcp.adapters.outbound.persistence.repositories import (
-    ConfirmationRepository,
-    DeviceRepository,
-    OperationRepository,
-    StateRepository,
-    ThingModelRepository,
-    WebhookNonceRepository,
-)
-from iot_mcp.adapters.outbound.webhook.channel import SignedWebhookMessageChannel
-from iot_mcp.application.confirmation_service import ConfirmationService
-from iot_mcp.application.control_service import ControlService
 from iot_mcp.application.policy import SafeControlError
-from iot_mcp.application.query_service import QueryService
+from iot_mcp.bootstrap.container import ApplicationContainer, create_container
 from iot_mcp.config.settings import Settings
 from iot_mcp.ports.device_provider import DeviceProvider
 
@@ -40,58 +24,34 @@ def create_app(
     *,
     settings: Settings | None = None,
     providers: dict[str, DeviceProvider] | None = None,
+    container: ApplicationContainer | None = None,
 ) -> FastAPI:
-    settings = settings or Settings()
-    providers = providers or {"mock": MockDeviceProvider()}
-    engine = create_database_engine(settings.database_url, echo=settings.sqlite_echo)
-    sessions = create_session_factory(engine)
+    if container is not None and (settings is not None or providers is not None):
+        raise ValueError("container cannot be combined with settings or providers")
+    container = container or create_container(settings, providers=providers)
+    settings = container.settings
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        await initialize_database(engine)
+        await container.startup()
         yield
-        await engine.dispose()
+        await container.shutdown()
 
     app = FastAPI(title="IoT MCP", version="0.1.0", lifespan=lifespan)
     app.state.settings = settings
-    app.state.providers = providers
-    app.state.models = ThingModelRepository(sessions)
-    app.state.devices = DeviceRepository(sessions)
-    app.state.states = StateRepository(sessions)
-    app.state.operations = OperationRepository(sessions)
-    app.state.confirmations = ConfirmationRepository(sessions)
-    app.state.webhook_nonces = WebhookNonceRepository(sessions)
-    app.state.webhook_channel = SignedWebhookMessageChannel(
-        secret=settings.webhook_secret,
-        allowed_actor_ids=settings.allowed_confirmation_actors,
-        nonces=app.state.webhook_nonces,
-        timestamp_tolerance_seconds=settings.webhook_timestamp_tolerance_seconds,
-        send_url=settings.webhook_send_url,
-    )
-    confirmation_actor = sorted(settings.allowed_confirmation_actors)[0]
-    app.state.control = ControlService(
-        devices=app.state.devices,
-        operations=app.state.operations,
-        confirmations=app.state.confirmations,
-        providers=providers,
-        confirmation_actor=confirmation_actor,
-        models=app.state.models,
-        message_channel=app.state.webhook_channel,
-        confirmation_ttl_seconds=settings.confirmation_ttl_seconds,
-    )
-    app.state.confirmation_service = ConfirmationService(
-        devices=app.state.devices,
-        operations=app.state.operations,
-        confirmations=app.state.confirmations,
-        control=app.state.control,
-    )
-    app.state.control.bind_confirmation_service(app.state.confirmation_service)
-    app.state.queries = QueryService(
-        models=app.state.models,
-        devices=app.state.devices,
-        operations=app.state.operations,
-        providers=providers,
-    )
+    app.state.runtime_container = container
+    app.state.providers = container.providers
+    app.state.models = container.models
+    app.state.devices = container.devices
+    app.state.states = container.states
+    app.state.operations = container.operations
+    app.state.confirmations = container.confirmations
+    app.state.webhook_nonces = container.webhook_nonces
+    app.state.webhook_channel = container.webhook_channel
+    app.state.control = container.control
+    app.state.confirmation_service = container.confirmation_service
+    app.state.queries = container.queries
+    app.state.provider_status = container.provider_status
 
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next: Any):
@@ -154,7 +114,28 @@ def create_app(
         )
 
     app.include_router(router)
+    _add_spa_fallback(app, settings)
     return app
+
+
+def _add_spa_fallback(app: FastAPI, settings: Settings) -> None:
+    dist = (
+        Path(settings.web_dist_path)
+        if settings.web_dist_path
+        else Path(__file__).resolve().parents[6] / "web" / "dist"
+    )
+    index = dist / "index.html"
+    if not index.is_file():
+        return
+
+    @app.get("/{asset_path:path}", include_in_schema=False)
+    async def spa_fallback(asset_path: str) -> FileResponse:
+        if asset_path in {"api", "mcp"} or asset_path.startswith(("api/", "mcp/")):
+            raise HTTPException(status_code=404)
+        candidate = (dist / asset_path).resolve()
+        if candidate.is_relative_to(dist.resolve()) and candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(index)
 
 
 def _error_response(

@@ -57,6 +57,9 @@ class HomeAssistantDeviceProvider:
         self._device_id_resolver = device_id_resolver
         self._routes: dict[str, dict[str, str]] = {}
 
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
     async def health(self) -> ProviderHealth:
         try:
             await self._client.get_states()

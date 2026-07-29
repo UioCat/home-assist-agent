@@ -12,6 +12,15 @@ class Settings(BaseSettings):
 
     database_url: str = "sqlite+aiosqlite:///./iot_mcp.db"
     sqlite_echo: bool = False
+    server_host: str = "127.0.0.1"
+    server_port: int = Field(default=8090, ge=1, le=65535)
+    mcp_host: str = "127.0.0.1"
+    mcp_port: int = Field(default=8091, ge=1, le=65535)
+    web_dist_path: str | None = None
+    mock_provider_enabled: bool = True
+    home_assistant_url: str | None = None
+    home_assistant_token: str | None = None
+    home_assistant_timeout_seconds: float = Field(default=10, gt=0)
     admin_token: str = ""
     machine_tokens: dict[str, str] = Field(default_factory=dict)
     session_signing_secret: str = Field(default_factory=lambda: secrets.token_urlsafe(32))
