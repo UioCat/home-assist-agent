@@ -1,3 +1,5 @@
+import pytest
+
 from iot_mcp.adapters.outbound.home_assistant.mapping import (
     capability_fingerprint,
     ha_brightness_to_percent,
@@ -48,3 +50,22 @@ def test_light_service_combines_power_and_brightness_without_state_writes() -> N
 
     assert (domain, service) == ("light", "turn_on")
     assert payload == {"entity_id": "light.desk", "brightness": 255}
+
+
+def test_lock_service_rejects_every_value_outside_the_closed_lock_enum() -> None:
+    for invalid in ("LOCKED", "UNLOCKED", "", None, ["UNLOCK"]):
+        with pytest.raises(ValueError, match="LockState"):
+            service_for_properties("lock.front", {"LockState": invalid})
+
+
+def test_climate_power_switch_maps_to_native_turn_services() -> None:
+    assert service_for_properties("climate.living", {"PowerSwitch": False}) == (
+        "climate",
+        "turn_off",
+        {"entity_id": "climate.living"},
+    )
+    assert service_for_properties("climate.living", {"PowerSwitch": True}) == (
+        "climate",
+        "turn_on",
+        {"entity_id": "climate.living"},
+    )

@@ -4,8 +4,12 @@ from collections.abc import AsyncIterator
 
 import httpx
 import pytest
+from sqlalchemy import select
 
-from iot_mcp.adapters.outbound.home_assistant.client import HomeAssistantClient
+from iot_mcp.adapters.outbound.home_assistant.client import (
+    HomeAssistantClient,
+    HomeAssistantError,
+)
 from iot_mcp.adapters.outbound.home_assistant.provider import HomeAssistantDeviceProvider
 from iot_mcp.adapters.outbound.persistence.database import (
     create_database_engine,
@@ -17,8 +21,30 @@ from iot_mcp.adapters.outbound.persistence.repositories import (
     StateRepository,
     ThingModelRepository,
 )
+from iot_mcp.adapters.outbound.persistence.tables import FeatureBindingTable
 from iot_mcp.application.sync_service import DeviceSyncService
 from iot_mcp.ports.device_provider import ProviderEvent, ProviderInventory
+
+
+async def _empty_registry() -> dict[str, str | None]:
+    return {}
+
+
+async def _shared_registry() -> dict[str, str | None]:
+    return {
+        "light.desk": "physical-hub",
+        "climate.living": "physical-hub",
+        "lock.front": None,
+    }
+
+
+def _client(calls: list[httpx.Request], registry_loader=_empty_registry) -> HomeAssistantClient:
+    return HomeAssistantClient(
+        "http://ha.test",
+        "not-a-real-token",
+        client=httpx.AsyncClient(transport=_transport(calls)),
+        registry_loader=registry_loader,
+    )
 
 
 def _transport(calls: list[httpx.Request]) -> httpx.MockTransport:
@@ -43,6 +69,12 @@ def _transport(calls: list[httpx.Request]) -> httpx.MockTransport:
             states["light.desk"]["state"] = "on"
             states["light.desk"]["attributes"]["brightness"] = body["brightness"]
             return httpx.Response(200, json=[])
+        if request.url.path == "/api/services/light/turn_off":
+            states["light.desk"]["state"] = "off"
+            return httpx.Response(200, json=[])
+        if request.url.path == "/api/services/climate/turn_off":
+            states["climate.living"]["state"] = "off"
+            return httpx.Response(200, json=[])
         return httpx.Response(404, json={"message": "missing"})
 
     return httpx.MockTransport(handler)
@@ -51,9 +83,7 @@ def _transport(calls: list[httpx.Request]) -> httpx.MockTransport:
 @pytest.mark.asyncio
 async def test_ha_provider_controls_only_through_services_and_reads_before_after() -> None:
     calls: list[httpx.Request] = []
-    client = HomeAssistantClient(
-        "http://ha.test", "not-a-real-token", client=httpx.AsyncClient(transport=_transport(calls))
-    )
+    client = _client(calls)
     provider = HomeAssistantDeviceProvider(client)
     inventory = await provider.discover()
     light = next(
@@ -77,9 +107,7 @@ async def test_ha_provider_controls_only_through_services_and_reads_before_after
 @pytest.mark.asyncio
 async def test_sync_upserts_and_marks_missing_and_refreshes_snapshots(tmp_path) -> None:
     calls: list[httpx.Request] = []
-    client = HomeAssistantClient(
-        "http://ha.test", "not-a-real-token", client=httpx.AsyncClient(transport=_transport(calls))
-    )
+    client = _client(calls)
     provider = HomeAssistantDeviceProvider(client)
     engine = create_database_engine(f"sqlite+aiosqlite:///{tmp_path / 'iot.db'}")
     await initialize_database(engine)
@@ -104,11 +132,21 @@ async def test_sync_upserts_and_marks_missing_and_refreshes_snapshots(tmp_path) 
 @pytest.mark.asyncio
 async def test_ha_provider_subscription_accepts_an_injected_fake_event_source() -> None:
     async def fake_events() -> AsyncIterator[dict[str, object]]:
-        yield {"event": {"data": {"entity_id": "light.desk"}}}
+        yield {
+            "event": {
+                "data": {
+                    "entity_id": "light.desk",
+                    "old_state": {"entity_id": "light.desk", "state": "off", "attributes": {}},
+                    "new_state": {
+                        "entity_id": "light.desk",
+                        "state": "on",
+                        "attributes": {"brightness": 255},
+                    },
+                }
+            }
+        }
 
-    client = HomeAssistantClient(
-        "http://ha.test", "not-a-real-token", client=httpx.AsyncClient(transport=_transport([]))
-    )
+    client = _client([])
     provider = HomeAssistantDeviceProvider(client, event_source=fake_events)
     received: list[ProviderEvent] = []
     subscription = await provider.subscribe(received.append)
@@ -120,6 +158,8 @@ async def test_ha_provider_subscription_accepts_an_injected_fake_event_source() 
 
     assert received[0].device_ref == "entity:light.desk"
     assert received[0].identifier == "state_changed"
+    assert received[0].values["PowerSwitch"] is True
+    assert received[0].values["Brightness"] == 100
     await subscription.close()
     await client.aclose()
 
@@ -127,15 +167,8 @@ async def test_ha_provider_subscription_accepts_an_injected_fake_event_source() 
 @pytest.mark.asyncio
 async def test_ha_registry_resolver_groups_entities_under_one_physical_device() -> None:
     calls: list[httpx.Request] = []
-    client = HomeAssistantClient(
-        "http://ha.test", "not-a-real-token", client=httpx.AsyncClient(transport=_transport(calls))
-    )
-    provider = HomeAssistantDeviceProvider(
-        client,
-        device_id_resolver=lambda state: (
-            "physical-hub" if state["entity_id"] != "lock.front" else None
-        ),
-    )
+    client = _client(calls, _shared_registry)
+    provider = HomeAssistantDeviceProvider(client)
 
     inventory = await provider.discover()
 
@@ -145,15 +178,17 @@ async def test_ha_registry_resolver_groups_entities_under_one_physical_device() 
     assert physical.metadata["virtual"] is False
     assert set(physical.metadata["entity_ids"]) == {"light.desk", "climate.living"}
     assert len(inventory.devices) == 2
+    assert {binding["identifier"] for binding in physical.feature_bindings} >= {
+        "PowerSwitch__light_desk",
+        "PowerSwitch__climate_living",
+    }
     await client.aclose()
 
 
 @pytest.mark.asyncio
 async def test_sync_marks_a_disappeared_provider_binding_missing(tmp_path) -> None:
     calls: list[httpx.Request] = []
-    client = HomeAssistantClient(
-        "http://ha.test", "not-a-real-token", client=httpx.AsyncClient(transport=_transport(calls))
-    )
+    client = _client(calls)
     provider = HomeAssistantDeviceProvider(client)
     initial = await provider.discover()
 
@@ -188,3 +223,61 @@ async def test_sync_marks_a_disappeared_provider_binding_missing(tmp_path) -> No
     assert {device.status for device in await device_repo.list_devices()} == {"missing"}
     await client.aclose()
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sync_preserves_unambiguous_duplicate_feature_routes(tmp_path) -> None:
+    calls: list[httpx.Request] = []
+    client = _client(calls, _shared_registry)
+    provider = HomeAssistantDeviceProvider(client)
+    engine = create_database_engine(f"sqlite+aiosqlite:///{tmp_path / 'iot.db'}")
+    await initialize_database(engine)
+    sessions = create_session_factory(engine)
+    device_repo = DeviceRepository(sessions)
+    service = DeviceSyncService(
+        provider, ThingModelRepository(sessions), device_repo, StateRepository(sessions)
+    )
+
+    await service.sync()
+    physical = next(
+        device for device in await device_repo.list_devices() if device.display_name == "light.desk"
+    )
+    async with sessions() as session:
+        identifiers = set(
+            await session.scalars(
+                select(FeatureBindingTable.identifier).where(
+                    FeatureBindingTable.device_id == physical.device_id
+                )
+            )
+        )
+    light_result = await provider.write_properties(
+        "device:physical-hub", {"PowerSwitch__light_desk": False}
+    )
+    climate_result = await provider.write_properties(
+        "device:physical-hub", {"PowerSwitch__climate_living": False}
+    )
+
+    assert {"PowerSwitch__light_desk", "PowerSwitch__climate_living"} <= identifiers
+    assert light_result.ok and climate_result.ok
+    assert "/api/services/light/turn_off" in [request.url.path for request in calls]
+    assert "/api/services/climate/turn_off" in [request.url.path for request in calls]
+    await client.aclose()
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_client_classifies_malformed_success_json_as_provider_error() -> None:
+    client = HomeAssistantClient(
+        "http://ha.test",
+        "not-a-real-token",
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, content=b"not json"))
+        ),
+        registry_loader=_empty_registry,
+    )
+
+    with pytest.raises(HomeAssistantError, match="invalid JSON") as error:
+        await client.get_states()
+
+    assert error.value.category == "provider_error"
+    await client.aclose()

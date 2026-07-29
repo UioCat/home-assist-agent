@@ -33,7 +33,9 @@ def _features_for_domain(domain: str) -> list[str]:
 
 def capability_fingerprint(device: ProviderDevice) -> str:
     """Hash only stable semantic capabilities, never names or entity routing ids."""
-    canonical = "|".join(sorted(binding["identifier"] for binding in device.feature_bindings))
+    canonical = "|".join(
+        sorted(binding["identifier"].split("__", 1)[0] for binding in device.feature_bindings)
+    )
     return f"sha256:{sha256(canonical.encode()).hexdigest()}"
 
 
@@ -117,6 +119,13 @@ def service_for_properties(
     if domain == "climate" and "TargetTemperature" in values:
         payload["temperature"] = values["TargetTemperature"]
         return "climate", "set_temperature", payload
+    if domain == "climate" and "PowerSwitch" in values:
+        if not isinstance(values["PowerSwitch"], bool):
+            raise ValueError("PowerSwitch must be boolean")
+        return "climate", "turn_on" if values["PowerSwitch"] else "turn_off", payload
     if domain == "lock" and "LockState" in values:
-        return "lock", "lock" if values["LockState"] == "LOCK" else "unlock", payload
+        lock_state = values["LockState"]
+        if not isinstance(lock_state, str) or lock_state not in {"LOCK", "UNLOCK"}:
+            raise ValueError("LockState must be LOCK or UNLOCK")
+        return "lock", "lock" if lock_state == "LOCK" else "unlock", payload
     raise ValueError(f"unsupported properties for {entity_id}: {sorted(values)}")

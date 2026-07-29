@@ -17,6 +17,7 @@ from iot_mcp.adapters.outbound.home_assistant.mapping import (
 from iot_mcp.ports.device_provider import (
     DeviceState,
     EventSink,
+    ProviderDevice,
     ProviderEvent,
     ProviderHealth,
     ProviderInventory,
@@ -64,9 +65,10 @@ class HomeAssistantDeviceProvider:
         return ProviderHealth(status="healthy")
 
     async def discover(self) -> ProviderInventory:
+        entity_device_ids = await self._client.get_entity_device_ids()
         states = await self._client.get_states()
         self._routes = {}
-        devices: dict[str, Any] = {}
+        devices: dict[str, ProviderDevice] = {}
         for state in states:
             if str(state.get("entity_id", "")).partition(".")[0] not in {
                 "light",
@@ -75,17 +77,20 @@ class HomeAssistantDeviceProvider:
                 "lock",
             }:
                 continue
-            device_id = (state.get("attributes") or {}).get("device_id")
+            device_id = entity_device_ids.get(state["entity_id"])
             if self._device_id_resolver is not None:
                 device_id = self._device_id_resolver(state)
             device = map_ha_state(state, device_id=device_id)
-            routes = self._routes.setdefault(device.external_ref, {})
-            for binding in device.feature_bindings:
-                routes[binding["identifier"]] = binding["provider_selector"]["entity_id"]
             previous = devices.get(device.external_ref)
             if previous is None:
                 devices[device.external_ref] = device
                 continue
+            duplicate_identifiers = {
+                binding["identifier"] for binding in previous.feature_bindings
+            } & {binding["identifier"] for binding in device.feature_bindings}
+            if duplicate_identifiers:
+                previous = self._qualify_collisions(previous, duplicate_identifiers)
+                device = self._qualify_collisions(device, duplicate_identifiers)
             merged = previous.model_copy(
                 update={
                     "feature_bindings": previous.feature_bindings + device.feature_bindings,
@@ -106,10 +111,35 @@ class HomeAssistantDeviceProvider:
                     "product_key": f"ha-{fingerprint[7:23]}",
                 }
             )
+        for device in devices.values():
+            self._routes[device.external_ref] = {
+                binding["identifier"]: binding["provider_selector"]["entity_id"]
+                for binding in device.feature_bindings
+            }
         return ProviderInventory(
             provider_id=self.provider_id,
             provider_type=self.provider_type,
             devices=list(devices.values()),
+        )
+
+    def _qualify_collisions(self, device: ProviderDevice, collisions: set[str]) -> ProviderDevice:
+        bindings: list[dict[str, Any]] = []
+        values = dict(device.state.values)
+        for binding in device.feature_bindings:
+            identifier = binding["identifier"]
+            if identifier not in collisions:
+                bindings.append(binding)
+                continue
+            entity_id = binding["provider_selector"]["entity_id"]
+            qualified = f"{identifier}__{entity_id.replace('.', '_')}"
+            bindings.append({**binding, "identifier": qualified})
+            if identifier in values:
+                values[qualified] = values.pop(identifier)
+        return device.model_copy(
+            update={
+                "feature_bindings": bindings,
+                "state": device.state.model_copy(update={"values": values}),
+            }
         )
 
     def _entity_id(self, device_ref: str, identifier: str | None = None) -> str:
@@ -134,7 +164,13 @@ class HomeAssistantDeviceProvider:
             entity_ids = {self._entity_id(device_ref)}
         values: dict[str, Any] = {}
         for entity_id in entity_ids:
-            values.update(properties_from_state(await self._client.get_state(entity_id)))
+            values.update(
+                self._project_entity_values(
+                    device_ref,
+                    entity_id,
+                    properties_from_state(await self._client.get_state(entity_id)),
+                )
+            )
         if selectors is not None:
             values = {key: value for key, value in values.items() if key in selectors}
         return DeviceState(device_ref=device_ref, values=values)
@@ -142,8 +178,14 @@ class HomeAssistantDeviceProvider:
     async def write_properties(self, device_ref: str, values: dict[str, Any]) -> ProviderResult:
         try:
             before = await self.read_state(device_ref)
-            entity_id = self._entity_id(device_ref, next(iter(values)))
-            domain, service, payload = service_for_properties(entity_id, values)
+            entity_ids = {self._entity_id(device_ref, identifier) for identifier in values}
+            if len(entity_ids) != 1:
+                raise ValueError("properties from multiple HA entities must be written separately")
+            entity_id = entity_ids.pop()
+            provider_values = {
+                identifier.split("__", 1)[0]: value for identifier, value in values.items()
+            }
+            domain, service, payload = service_for_properties(entity_id, provider_values)
             response = await self._client.call_service(domain, service, payload)
             after = await self.read_state(device_ref)
         except HomeAssistantError as error:
@@ -189,10 +231,32 @@ class HomeAssistantDeviceProvider:
         entity_id = data.get("entity_id")
         if not isinstance(entity_id, str):
             return None
+        new_state = data.get("new_state")
+        if not isinstance(new_state, dict):
+            return None
         ref = next(
-            (key for key, value in self._routes.items() if value == entity_id),
+            (key for key, routes in self._routes.items() if entity_id in routes.values()),
             f"entity:{entity_id}",
         )
         return ProviderEvent(
-            device_ref=ref, identifier="state_changed", values={"entity_id": entity_id}
+            device_ref=ref,
+            identifier="state_changed",
+            values={
+                "entity_id": entity_id,
+                "old_state": data.get("old_state"),
+                **self._project_entity_values(ref, entity_id, properties_from_state(new_state)),
+            },
         )
+
+    def _project_entity_values(
+        self, device_ref: str, entity_id: str, values: dict[str, Any]
+    ) -> dict[str, Any]:
+        routes = self._routes.get(device_ref)
+        if routes is None:
+            return values
+        projected: dict[str, Any] = {}
+        for identifier, route_entity_id in routes.items():
+            base_identifier = identifier.split("__", 1)[0]
+            if route_entity_id == entity_id and base_identifier in values:
+                projected[identifier] = values[base_identifier]
+        return projected
