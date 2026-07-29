@@ -70,6 +70,9 @@ export function OperationsPage() {
                     </div>
                     <div className="confirmation-row__action">
                       <strong>{item.operation?.action_summary ?? "无动作摘要"}</strong>
+                      {item.operation?.sensitive_values_redacted ? (
+                        <small className="redaction-note">敏感值已隐藏</small>
+                      ) : null}
                       <dl>
                         <div><dt>目标</dt><dd className="mono">{item.confirmation.target}</dd></div>
                         <div><dt>Provider</dt><dd className="mono">{item.confirmation.provider_id ?? "unbound"}</dd></div>

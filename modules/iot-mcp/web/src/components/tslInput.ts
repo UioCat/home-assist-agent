@@ -49,7 +49,10 @@ export function parseTslInput(
   const text = String(raw);
   if (!text.trim()) {
     if (options.required) throw new Error("此字段为必填项");
-    return { present: options.touched, value: options.touched ? "" : undefined };
+    if (type.type === "text" && options.touched) {
+      return { present: true, value: "" };
+    }
+    return { present: false };
   }
 
   if (type.type === "int" || type.type === "float" || type.type === "double") {

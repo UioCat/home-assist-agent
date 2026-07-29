@@ -265,6 +265,7 @@ async def test_web_console_read_contract_exposes_operational_collections(setting
             "source_label",
             "action_kind",
             "action_summary",
+            "sensitive_values_redacted",
             "target",
             "provider_id",
             "provider_type",
@@ -275,6 +276,10 @@ async def test_web_console_read_contract_exposes_operational_collections(setting
             "updated_at",
         }
         assert operations.json()[0]["source_label"] == "Machine automation"
+        assert operations.json()[0]["action_summary"] == (
+            "写入 3 个属性：LockState、nested、pin"
+        )
+        assert operations.json()[0]["sensitive_values_redacted"] is True
         assert confirmations.status_code == 200
         assert confirmations.json()[0]["confirmation"]["confirmation_id"] == confirmation_id
         assert "initiator" not in confirmations.json()[0]["operation"]
@@ -289,7 +294,6 @@ async def test_web_console_read_contract_exposes_operational_collections(setting
             "provider-result-secret",
         ):
             assert secret not in serialized
-        assert '"pin"' not in serialized.lower()
         assert events.status_code == 200
         assert events.json() == []
         assert providers.status_code == 200

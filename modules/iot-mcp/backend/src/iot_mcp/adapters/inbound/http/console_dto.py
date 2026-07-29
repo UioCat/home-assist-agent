@@ -39,8 +39,7 @@ def redact_sensitive(value: Any) -> Any:
 def operation_console_dto(
     operation: ControlOperation, device: DeviceInstance | None = None
 ) -> dict[str, Any]:
-    action = redact_sensitive(operation.action)
-    action_kind, action_summary = _action_summary(action)
+    action_kind, action_summary = _action_summary(operation.action)
     source_category, source_label = _source(operation)
     return {
         "operation_id": operation.operation_id,
@@ -49,6 +48,7 @@ def operation_console_dto(
         "source_label": source_label,
         "action_kind": action_kind,
         "action_summary": action_summary,
+        "sensitive_values_redacted": _contains_sensitive_key(operation.action),
         "target": operation.external_device_ref or operation.device_id,
         "provider_id": operation.provider_id,
         "provider_type": operation.provider_type,
@@ -89,6 +89,17 @@ def _is_sensitive_key(key: str) -> bool:
     return any(part in normalized for part in _SENSITIVE_KEY_PARTS)
 
 
+def _contains_sensitive_key(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(
+            _is_sensitive_key(str(key)) or _contains_sensitive_key(child)
+            for key, child in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(_contains_sensitive_key(child) for child in value)
+    return False
+
+
 def _action_summary(action: Any) -> tuple[str, str]:
     if not isinstance(action, dict):
         return "unknown", "未知动作"
@@ -96,7 +107,7 @@ def _action_summary(action: Any) -> tuple[str, str]:
     if kind == "properties":
         values = action.get("values")
         identifiers = (
-            sorted(str(key) for key in values if not _is_sensitive_key(str(key)))
+            sorted(str(key) for key in values)
             if isinstance(values, dict)
             else []
         )
@@ -105,12 +116,9 @@ def _action_summary(action: Any) -> tuple[str, str]:
     if kind == "service":
         service = str(action.get("service") or action.get("identifier") or "unknown")
         inputs = action.get("inputs")
-        count = (
-            sum(not _is_sensitive_key(str(key)) for key in inputs)
-            if isinstance(inputs, dict)
-            else 0
-        )
-        return kind, f"调用服务 {service}（{count} 个参数）"
+        identifiers = sorted(str(key) for key in inputs) if isinstance(inputs, dict) else []
+        suffix = f"：{'、'.join(identifiers)}" if identifiers else ""
+        return kind, f"调用服务 {service}（{len(identifiers)} 个参数{suffix}）"
     return "unknown", "未知动作"
 
 

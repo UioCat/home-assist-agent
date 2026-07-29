@@ -8,6 +8,7 @@ import { PageState } from "../components/PageState";
 import { DeviceDetailPage } from "../pages/DeviceDetailPage";
 import { DevicesPage } from "../pages/DevicesPage";
 import { OperationsPage } from "../pages/OperationsPage";
+import { ProvidersPage } from "../pages/ProvidersPage";
 import { ThingModelsPage } from "../pages/ThingModelsPage";
 
 function deferred<T>() {
@@ -88,6 +89,11 @@ describe("console states and safety interactions", () => {
 
     const approveButton = await screen.findByRole("button", { name: "批准此操作" });
     expect(screen.getByText("自动任务")).toBeInTheDocument();
+    expect(
+      screen.getAllByText("写入 3 个属性：KeypadLock、LockState、pin"),
+    ).toHaveLength(2);
+    expect(screen.getByText("敏感值已隐藏")).toBeInTheDocument();
+    expect(screen.queryByText(/839201/)).not.toBeInTheDocument();
     await user.click(approveButton);
 
     await waitFor(() => expect(approve).toHaveBeenCalledWith("confirm-1", "approve", "hash-1"));
@@ -104,6 +110,55 @@ describe("console states and safety interactions", () => {
 
     await waitFor(() => expect(reject).toHaveBeenCalledWith("confirm-1", "reject", "hash-1"));
     expect(screen.getByText(/决定已提交：拒绝/)).toBeInTheDocument();
+  });
+
+  it("disables confirmation decisions and reports an authenticated POST error", async () => {
+    const api = new DemoApiClient();
+    const pending = deferred<Awaited<ReturnType<DemoApiClient["decideConfirmation"]>>>();
+    vi.spyOn(api, "decideConfirmation").mockReturnValue(pending.promise);
+    const user = userEvent.setup();
+    renderWithApi(<OperationsPage />, api);
+
+    await user.click(await screen.findByRole("button", { name: "批准此操作" }));
+    expect(screen.getByRole("button", { name: "批准此操作" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "拒绝此操作" })).toBeDisabled();
+    await act(async () => pending.reject(new Error("decision denied")));
+    expect(await screen.findByText("提交失败：decision denied")).toBeInTheDocument();
+  });
+
+  it("disables service invoke and reports its POST error", async () => {
+    const api = new DemoApiClient();
+    const pending = deferred<Awaited<ReturnType<DemoApiClient["invokeService"]>>>();
+    vi.spyOn(api, "invokeService").mockReturnValue(pending.promise);
+    const user = userEvent.setup();
+    renderWithApi(
+      <Routes>
+        <Route path="/devices/:deviceId" element={<DeviceDetailPage />} />
+      </Routes>,
+      api,
+      ["/devices/device-lock"],
+    );
+
+    await screen.findByRole("heading", { name: "玄关门锁" });
+    await user.type(screen.getByRole("spinbutton", { name: /持续秒数/ }), "10");
+    await user.click(screen.getByRole("button", { name: "直接调用服务" }));
+    expect(screen.getByRole("button", { name: "调用中…" })).toBeDisabled();
+    await act(async () => pending.reject(new Error("invoke denied")));
+    expect(await screen.findByText("执行失败：invoke denied")).toBeInTheDocument();
+  });
+
+  it("disables provider sync and reports its POST error", async () => {
+    const api = new DemoApiClient();
+    const pending = deferred<Awaited<ReturnType<DemoApiClient["syncProvider"]>>>();
+    vi.spyOn(api, "syncProvider").mockReturnValue(pending.promise);
+    const user = userEvent.setup();
+    renderWithApi(<ProvidersPage />, api);
+
+    const syncButtons = await screen.findAllByRole("button", { name: "手动同步" });
+    await user.click(syncButtons[0]);
+    expect(screen.getByRole("button", { name: "同步中…" })).toBeDisabled();
+    await act(async () => pending.reject(new Error("sync denied")));
+    expect(await screen.findByText("同步失败：sync denied")).toBeInTheDocument();
   });
 
   it("keeps mutable demo device state isolated per API client", async () => {

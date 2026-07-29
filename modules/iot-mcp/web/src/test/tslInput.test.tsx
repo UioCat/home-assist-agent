@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import type { TslDataType, TslService } from "../api/types";
@@ -42,6 +42,31 @@ describe("TSL input parsing", () => {
     expect(() => parseTslInput("{}", type("array"), { required: true, touched: true })).toThrow("数组");
   });
 
+  it.each(["int", "float", "double", "date", "struct", "array"] as const)(
+    "omits a touched then cleared optional %s instead of sending an empty string",
+    (dataType) => {
+      expect(
+        parseTslInput("", type(dataType), { required: false, touched: true }),
+      ).toEqual({ present: false });
+    },
+  );
+
+  it.each(["int", "date", "struct", "array"] as const)(
+    "rejects a touched then cleared required %s",
+    (dataType) => {
+      expect(() =>
+        parseTslInput("", type(dataType), { required: true, touched: true }),
+      ).toThrow("必填");
+    },
+  );
+
+  it("preserves an explicitly cleared optional text value", () => {
+    expect(parseTslInput("", type("text"), { required: false, touched: true })).toEqual({
+      present: true,
+      value: "",
+    });
+  });
+
   it("blocks invalid high-risk service input and omits untouched optional inputs", async () => {
     const service: TslService = {
       identifier: "TemporaryUnlock",
@@ -73,5 +98,50 @@ describe("TSL input parsing", () => {
     await user.type(screen.getByRole("spinbutton", { name: /持续秒数/ }), "10");
     await user.click(screen.getByRole("button", { name: "直接调用服务" }));
     expect(submit).toHaveBeenCalledWith({ duration: 10 });
+  });
+
+  it("omits a cleared optional structured value and blocks a cleared required one", async () => {
+    const service: TslService = {
+      identifier: "Configure",
+      name: "配置",
+      inputData: [
+        {
+          identifier: "samples",
+          name: "采样",
+          required: false,
+          dataType: type("array"),
+        },
+        {
+          identifier: "policy",
+          name: "策略",
+          required: true,
+          dataType: type("struct"),
+        },
+      ],
+      outputData: [],
+    };
+    const submit = vi.fn().mockResolvedValue({
+      operation_id: "op",
+      device_id: "door",
+      status: "succeeded",
+    });
+    const user = userEvent.setup();
+    render(<ServiceControl service={service} risk="high" onSubmit={submit} />);
+
+    await user.type(screen.getByLabelText("采样"), "[1]");
+    await user.clear(screen.getByLabelText("采样"));
+    fireEvent.change(screen.getByLabelText(/策略/), {
+      target: { value: '{"mode":"safe"}' },
+    });
+    await user.clear(screen.getByLabelText(/策略/));
+    await user.click(screen.getByRole("button", { name: "直接调用服务" }));
+    expect(submit).not.toHaveBeenCalled();
+    expect(await screen.findByText("此字段为必填项")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/策略/), {
+      target: { value: '{"mode":"safe"}' },
+    });
+    await user.click(screen.getByRole("button", { name: "直接调用服务" }));
+    expect(submit).toHaveBeenCalledWith({ policy: { mode: "safe" } });
   });
 });

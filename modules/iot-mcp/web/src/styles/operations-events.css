@@ -68,6 +68,11 @@
   margin: 8px 0 0;
 }
 
+.redaction-note {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
 .confirmation-row__action dl div {
   display: flex;
   min-width: 0;

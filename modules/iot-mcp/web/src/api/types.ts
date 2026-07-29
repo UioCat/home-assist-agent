@@ -122,6 +122,7 @@ export interface ConsoleOperation extends OperationResult {
   source_label: string;
   action_kind: "properties" | "service" | "unknown";
   action_summary: string;
+  sensitive_values_redacted: boolean;
   target: string;
   provider_id: string | null;
   provider_type: string | null;

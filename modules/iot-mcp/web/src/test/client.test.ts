@@ -147,4 +147,56 @@ describe("HttpApiClient authentication", () => {
     expect(onInvalid).toHaveBeenCalledOnce();
     expect(fetchMock.mock.calls[2][1]?.headers).not.toHaveProperty("X-CSRF-Token");
   });
+
+  it("sends authenticated decision, invoke, and sync POST contracts", async () => {
+    const json = (body: unknown) =>
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        json({ csrf_token: "csrf-post", expires_at: "2026-07-29T10:00:00Z" }),
+      )
+      .mockResolvedValueOnce(
+        json({ operation_id: "op-decision", device_id: "door", status: "succeeded" }),
+      )
+      .mockResolvedValueOnce(
+        json({ operation_id: "op-invoke", device_id: "door", status: "succeeded" }),
+      )
+      .mockResolvedValueOnce(
+        json({ discovered: 3, upserted: 2, missing: 1, snapshots: 2 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new HttpApiClient();
+
+    await client.bootstrapSession();
+    await client.decideConfirmation("confirm 1", "approve", "hash-1");
+    await client.invokeService("device 1", "Temporary Unlock", { duration: 10 });
+    await client.syncProvider("home assistant");
+
+    expect(fetchMock.mock.calls.slice(1).map(([url]) => url)).toEqual([
+      "/api/v1/confirmations/confirm%201:approve",
+      "/api/v1/devices/device%201/services/Temporary%20Unlock:invoke",
+      "/api/v1/providers/home%20assistant:sync",
+    ]);
+    expect(fetchMock.mock.calls.slice(1).map(([, init]) => init?.method)).toEqual([
+      "POST",
+      "POST",
+      "POST",
+    ]);
+    for (const [, init] of fetchMock.mock.calls.slice(1)) {
+      expect(init?.headers).toMatchObject({ "X-CSRF-Token": "csrf-post" });
+    }
+    expect(fetchMock.mock.calls[1][1]?.body).toBe(
+      JSON.stringify({ action_hash: "hash-1" }),
+    );
+    expect(fetchMock.mock.calls[2][1]?.body).toBe(
+      JSON.stringify({ inputs: { duration: 10 } }),
+    );
+    expect(fetchMock.mock.calls[2][1]?.headers).toEqual(
+      expect.objectContaining({ "Idempotency-Key": expect.any(String) }),
+    );
+  });
 });
