@@ -17,6 +17,16 @@ async def test_mock_provider_exercises_common_device_provider_contract() -> None
         "mock:lock:front_door",
     }
     light = next(device for device in inventory.devices if device.external_ref == "mock:light:desk")
+    climate = next(
+        device
+        for device in inventory.devices
+        if device.external_ref == "mock:climate:living_room"
+    )
+    assert any(
+        binding["feature_type"] == "service"
+        and binding["identifier"] == "SetTemperature"
+        for binding in climate.feature_bindings
+    )
     state = await provider.read_state(light.external_ref, ["PowerSwitch", "Brightness"])
     assert state.values["Brightness"] == 50
 
@@ -30,6 +40,15 @@ async def test_mock_provider_exercises_common_device_provider_contract() -> None
     assert result.ok
     assert updated.values["Brightness"] == 100
     assert events[-1].identifier == "state_changed"
+    service_result = await provider.invoke_service(
+        climate.external_ref,
+        "SetTemperature",
+        {"temperature": 24},
+    )
+    assert service_result.ok
+    assert (
+        await provider.read_state(climate.external_ref, ["TargetTemperature"])
+    ).values == {"TargetTemperature": 24}
     await subscription.close()
 
 

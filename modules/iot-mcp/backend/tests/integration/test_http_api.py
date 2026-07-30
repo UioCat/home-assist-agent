@@ -277,7 +277,7 @@ async def test_web_console_read_contract_exposes_operational_collections(setting
         }
         assert operations.json()[0]["source_label"] == "Machine automation"
         assert operations.json()[0]["action_summary"] == (
-            "写入 3 个属性：LockState、nested、pin"
+            '写入属性：LockState=UNLOCK、nested={"authorization":"[REDACTED]"}、pin=[REDACTED]'
         )
         assert operations.json()[0]["sensitive_values_redacted"] is True
         assert confirmations.status_code == 200
@@ -320,8 +320,64 @@ async def test_web_console_read_contract_exposes_operational_collections(setting
             "bindings",
             "feature_bindings",
             "model_versions",
+            "bound_model",
         }
         assert csrf
+
+
+@pytest.mark.asyncio
+async def test_all_http_operation_boundaries_use_the_safe_public_dto(settings) -> None:
+    async for app, client in _client(settings):
+        pending = await client.post(
+            "/api/v1/devices/door/properties:write",
+            headers={
+                "Authorization": "Bearer machine-secret",
+                "Idempotency-Key": "secret-idempotency-value",
+            },
+            json={
+                "values": {
+                    "LockState": "UNLOCK",
+                    "pin": "839201",
+                    "nested": {"credential": "provider-credential"},
+                }
+            },
+        )
+        operation_id = pending.json()["operation_id"]
+        detail = await client.get(
+            f"/api/v1/operations/{operation_id}",
+            headers={"Authorization": "Bearer admin-secret"},
+        )
+        confirmation = await app.state.confirmations.get_by_operation(operation_id)
+        assert confirmation is not None
+        login = await client.post(
+            "/api/v1/auth/session",
+            headers={"Authorization": "Bearer admin-secret"},
+        )
+        approved = await client.post(
+            f"/api/v1/confirmations/{confirmation.confirmation_id}:approve",
+            headers={"X-CSRF-Token": login.json()["csrf_token"]},
+            json={"action_hash": confirmation.action_hash},
+        )
+
+        for response in (pending, detail, approved):
+            assert response.status_code in {200, 202}
+            body = response.json()
+            assert body["action"]["values"]["LockState"] == "UNLOCK"
+            assert body["action"]["values"]["pin"] == "[REDACTED]"
+            assert body["action"]["values"]["nested"] == {
+                "credential": "[REDACTED]"
+            }
+            assert "idempotency_key" not in body
+            assert "provider_request" not in body
+            assert "provider_result" not in body
+        serialized = pending.text + detail.text + approved.text
+        for secret in (
+            "839201",
+            "provider-credential",
+            "secret-idempotency-value",
+            "machine_token:agent",
+        ):
+            assert secret not in serialized
 
 
 @pytest.mark.asyncio

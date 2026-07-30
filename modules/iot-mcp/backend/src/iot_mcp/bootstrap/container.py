@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 from dataclasses import dataclass, field
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -28,7 +30,13 @@ from iot_mcp.application.control_service import ControlService
 from iot_mcp.application.query_service import QueryService
 from iot_mcp.application.sync_service import DeviceSyncService
 from iot_mcp.config.settings import Settings
-from iot_mcp.ports.device_provider import DeviceProvider
+from iot_mcp.domain.enums import Freshness
+from iot_mcp.domain.models import DeviceEvent, PropertySnapshot
+from iot_mcp.ports.device_provider import (
+    DeviceProvider,
+    ProviderEvent,
+    Subscription,
+)
 
 
 @dataclass(slots=True)
@@ -48,6 +56,11 @@ class ApplicationContainer:
     confirmation_service: ConfirmationService
     queries: QueryService
     provider_status: dict[str, str] = field(default_factory=dict)
+    _last_sync_success: dict[str, bool] = field(default_factory=dict)
+    _background_tasks: dict[str, asyncio.Task[None]] = field(
+        default_factory=dict
+    )
+    _subscriptions: dict[str, Subscription] = field(default_factory=dict)
     _started: bool = False
 
     async def startup(self) -> None:
@@ -60,13 +73,38 @@ class ApplicationContainer:
             except Exception:
                 # A failed sync is explicitly degraded; no inventory or state is invented.
                 self.provider_status[provider_id] = "degraded"
+                self._last_sync_success[provider_id] = False
             else:
                 self.provider_status[provider_id] = "healthy"
+                self._last_sync_success[provider_id] = True
         self._started = True
+        for provider_id, provider in self.providers.items():
+            self._background_tasks[f"subscribe:{provider_id}"] = (
+                asyncio.create_task(
+                    self._subscription_loop(provider_id, provider)
+                )
+            )
+        self._background_tasks["reconcile"] = asyncio.create_task(
+            self._reconciliation_loop()
+        )
 
     async def shutdown(self) -> None:
         if not self._started:
             return
+        self._started = False
+        subscriptions = list(self._subscriptions.values())
+        self._subscriptions.clear()
+        for subscription in subscriptions:
+            try:
+                await subscription.close()
+            except Exception:
+                pass
+        tasks = list(self._background_tasks.values())
+        self._background_tasks.clear()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         for provider in self.providers.values():
             close = getattr(provider, "aclose", None)
             if close is not None:
@@ -75,7 +113,111 @@ class ApplicationContainer:
                 except Exception:
                     pass
         await self.engine.dispose()
-        self._started = False
+
+    async def _subscription_loop(
+        self, provider_id: str, provider: DeviceProvider
+    ) -> None:
+        while self._started:
+            subscription: Subscription | None = None
+            try:
+                subscription = await provider.subscribe(
+                    lambda event: self._persist_provider_event(
+                        provider_id, provider, event
+                    )
+                )
+                self._subscriptions[provider_id] = subscription
+                if self._last_sync_success.get(provider_id):
+                    self.provider_status[provider_id] = "healthy"
+                wait = getattr(subscription, "wait", None)
+                if wait is None:
+                    while self._started:
+                        await asyncio.sleep(
+                            self.settings.provider_reconnect_delay_seconds
+                        )
+                else:
+                    result = wait()
+                    if inspect.isawaitable(result):
+                        await result
+                if self._started:
+                    raise RuntimeError("provider subscription ended")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self.provider_status[provider_id] = "degraded"
+                await asyncio.sleep(
+                    self.settings.provider_reconnect_delay_seconds
+                )
+            finally:
+                if self._subscriptions.get(provider_id) is subscription:
+                    self._subscriptions.pop(provider_id, None)
+                if subscription is not None:
+                    try:
+                        await subscription.close()
+                    except Exception:
+                        pass
+
+    async def _reconciliation_loop(self) -> None:
+        while self._started:
+            try:
+                await asyncio.sleep(
+                    self.settings.reconcile_interval_seconds
+                )
+            except asyncio.CancelledError:
+                raise
+            if not self._started:
+                return
+            for provider_id, provider in self.providers.items():
+                try:
+                    await DeviceSyncService(
+                        provider,
+                        self.models,
+                        self.devices,
+                        self.states,
+                    ).sync()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    self._last_sync_success[provider_id] = False
+                    self.provider_status[provider_id] = "degraded"
+                else:
+                    self._last_sync_success[provider_id] = True
+                    self.provider_status[provider_id] = "healthy"
+
+    async def _persist_provider_event(
+        self,
+        provider_id: str,
+        provider: DeviceProvider,
+        event: ProviderEvent,
+    ) -> None:
+        binding = await self.devices.get_binding_by_provider_ref(
+            provider_id,
+            provider.provider_type,
+            event.device_ref,
+        )
+        if binding is None:
+            self.provider_status[provider_id] = "degraded"
+            return
+        for identifier, value in event.values.items():
+            await self.states.add_snapshot(
+                PropertySnapshot(
+                    device_id=binding.device_id,
+                    identifier=identifier,
+                    value=value,
+                    observed_at=event.occurred_at,
+                    source=provider.provider_type,
+                    freshness=Freshness.FRESH,
+                )
+            )
+        await self.states.add_event(
+            DeviceEvent(
+                device_id=binding.device_id,
+                identifier=event.identifier,
+                type="info",
+                output_data=event.values,
+                occurred_at=event.occurred_at,
+                source=provider.provider_type,
+            )
+        )
 
 
 def create_container(

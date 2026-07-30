@@ -60,6 +60,7 @@ class ThingModelVersion(DomainModel):
 class DeviceInstance(DomainModel):
     device_id: str = Field(default_factory=_new_id)
     product_id: str | None = None
+    model_version_id: str | None = None
     provider_id: str = Field(min_length=1)
     display_name: str = Field(min_length=1)
     area: str | None = None
@@ -130,6 +131,7 @@ class ControlOperation(DomainModel):
     binding_revision: int | None = Field(default=None, ge=1)
     status: OperationStatus = OperationStatus.REQUESTED
     idempotency_key: str = Field(min_length=1)
+    request_fingerprint: str | None = None
     provider_request: dict[str, Any] | None = None
     provider_result: dict[str, Any] | None = None
     result: dict[str, Any] | None = None

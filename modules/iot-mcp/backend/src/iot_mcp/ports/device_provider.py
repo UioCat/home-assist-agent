@@ -62,6 +62,8 @@ class ProviderEvent(BaseModel):
 
 
 class Subscription(Protocol):
+    async def wait(self) -> None: ...
+
     async def close(self) -> None: ...
 
 

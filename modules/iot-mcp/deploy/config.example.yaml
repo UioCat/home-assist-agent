@@ -26,6 +26,14 @@ storage:
     env: IOT_MCP_DATABASE_URL
     value: sqlite+aiosqlite:///./iot_mcp.db
 
+runtime:
+  reconcile_interval_seconds:
+    env: IOT_MCP_RECONCILE_INTERVAL_SECONDS
+    value: 600
+  provider_reconnect_delay_seconds:
+    env: IOT_MCP_PROVIDER_RECONNECT_DELAY_SECONDS
+    value: 1
+
 auth:
   # Replace every placeholder and inject it from a secret manager.
   admin_token:

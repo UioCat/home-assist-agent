@@ -108,7 +108,7 @@ async def test_provider_offline_and_timeout_never_claim_success(tmp_path: Path) 
         assert response.json()["status"] == "unknown"
         assert response.json()["result"] == {
             "code": "provider_timeout",
-            "retryable": True,
+            "retryable": False,
         }
         assert timeout.write_attempts == 1
     finally:

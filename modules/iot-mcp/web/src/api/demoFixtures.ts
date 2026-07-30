@@ -122,6 +122,7 @@ const devices: Device[] = [
   {
     device_id: "device-lock",
     product_id: "product-lock",
+    model_version_id: "model-lock-v3",
     provider_id: "home-assistant",
     display_name: "玄关门锁",
     area: "玄关",
@@ -133,6 +134,7 @@ const devices: Device[] = [
   {
     device_id: "device-climate",
     product_id: "product-climate",
+    model_version_id: "model-climate-v2",
     provider_id: "home-assistant",
     display_name: "客厅空调",
     area: "客厅",
@@ -144,6 +146,7 @@ const devices: Device[] = [
   {
     device_id: "device-lamp",
     product_id: null,
+    model_version_id: null,
     provider_id: "lan-http-mock",
     display_name: "书房台灯",
     area: "书房",
@@ -159,7 +162,9 @@ export function buildDemoDeviceDetail(
   states: Record<string, DeviceState>,
   models: ThingModelVersion[],
 ): DeviceDetail {
-  const model = models.find((candidate) => candidate.product_id === device.product_id);
+  const model = models.find(
+    (candidate) => candidate.model_version_id === device.model_version_id,
+  );
   return {
     device,
     bindings: [
@@ -193,6 +198,7 @@ export function buildDemoDeviceDetail(
         }))
       : [],
     model_versions: model ? [model] : [],
+    bound_model: model ?? null,
   };
 }
 

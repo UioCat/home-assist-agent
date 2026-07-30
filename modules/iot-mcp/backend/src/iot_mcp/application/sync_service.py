@@ -23,7 +23,14 @@ from iot_mcp.ports.device_provider import DeviceProvider, ProviderDevice
 
 
 class SyncResult:
-    def __init__(self, *, discovered: int, upserted: int, missing: int, snapshots: int) -> None:
+    def __init__(
+        self,
+        *,
+        discovered: int,
+        upserted: int,
+        missing: int,
+        snapshots: int,
+    ) -> None:
         self.discovered = discovered
         self.upserted = upserted
         self.missing = missing
@@ -50,17 +57,25 @@ class DeviceSyncService:
         for discovered in inventory.devices:
             product, model = await self._ensure_model(discovered)
             device_id = str(
-                uuid5(NAMESPACE_URL, f"{inventory.provider_type}:{discovered.external_ref}")
+                uuid5(
+                    NAMESPACE_URL,
+                    f"{inventory.provider_type}:{discovered.external_ref}",
+                )
             )
+            existing = await self._devices.get_device(device_id)
             instance = await self._devices.upsert_device(
                 DeviceInstance(
                     device_id=device_id,
                     product_id=product.product_id,
+                    model_version_id=model.model_version_id,
                     provider_id=inventory.provider_id,
                     display_name=discovered.display_name,
                     area=discovered.area,
                     risk_level=RiskLevel(discovered.risk_level),
                     status="active",
+                    created_at=(
+                        existing.created_at if existing is not None else utc_now()
+                    ),
                 )
             )
             await self._devices.upsert_binding(
@@ -72,14 +87,17 @@ class DeviceSyncService:
                     route_data=discovered.metadata,
                 )
             )
-            for binding in discovered.feature_bindings:
-                await self._devices.upsert_feature_binding(
-                    FeatureBinding(
-                        device_id=instance.device_id,
-                        model_version_id=model.model_version_id,
-                        **binding,
-                    )
+            feature_bindings = [
+                FeatureBinding(
+                    device_id=instance.device_id,
+                    model_version_id=model.model_version_id,
+                    **binding,
                 )
+                for binding in discovered.feature_bindings
+            ]
+            await self._devices.replace_feature_bindings(
+                instance.device_id, feature_bindings
+            )
             for identifier, value in discovered.state.values.items():
                 await self._states.add_snapshot(
                     PropertySnapshot(
@@ -105,7 +123,12 @@ class DeviceSyncService:
                 for binding in bindings
             ):
                 await self._devices.upsert_device(
-                    device.model_copy(update={"status": "missing", "updated_at": utc_now()})
+                    device.model_copy(
+                        update={
+                            "status": "missing",
+                            "updated_at": utc_now(),
+                        }
+                    )
                 )
                 missing += 1
         return SyncResult(
@@ -115,8 +138,14 @@ class DeviceSyncService:
             snapshots=snapshots,
         )
 
-    async def _ensure_model(self, device: ProviderDevice) -> tuple[ThingProduct, ThingModelVersion]:
+    async def _ensure_model(
+        self, device: ProviderDevice
+    ) -> tuple[ThingProduct, ThingModelVersion]:
         existing = await self._models.get_product_by_key(device.product_key)
+        if existing is not None and existing.source != self._provider.provider_type:
+            raise ValueError(
+                "system product key collides with a non-provider product"
+            )
         product = await self._models.upsert_product(
             ThingProduct(
                 product_id=(
@@ -130,60 +159,114 @@ class DeviceSyncService:
                 capability_fingerprint=device.capability_fingerprint,
             )
         )
-        versions = await self._models.list_model_versions(product.product_id)
-        tsl = _generated_tsl(device)
-        matching = next((version for version in versions if version.tsl_json == tsl), None)
-        if matching:
-            return product, matching
-        model = await self._models.add_model_version(
-            ThingModelVersion(
-                product_id=product.product_id,
-                version=(max((version.version for version in versions), default=0) + 1),
-                status=ModelStatus.ACTIVE,
-                tsl_json=tsl,
-            )
+        versions = await self._models.list_model_versions(
+            product.product_id
         )
-        return product, model
+        tsl = generated_tsl(device)
+        matching = next(
+            (
+                version
+                for version in versions
+                if version.tsl_json == tsl
+                and version.status is ModelStatus.ACTIVE
+            ),
+            None,
+        )
+        if matching is not None:
+            return product, matching
+        model = ThingModelVersion(
+            product_id=product.product_id,
+            version=(
+                max((version.version for version in versions), default=0) + 1
+            ),
+            status=ModelStatus.ACTIVE,
+            tsl_json=tsl,
+        )
+        return product, await self._models.add_active_model_version(model)
 
 
-def _generated_tsl(device: ProviderDevice) -> dict[str, object]:
-    bindings = {
-        binding["identifier"]: binding for binding in device.feature_bindings
-    }
-    identifiers = sorted(set(bindings) | set(device.state.values))
+def generated_tsl(device: ProviderDevice) -> dict[str, object]:
+    properties: list[dict[str, object]] = []
+    services: list[dict[str, object]] = []
+    events: list[dict[str, object]] = []
+    for binding in sorted(
+        device.feature_bindings,
+        key=lambda item: (
+            str(item["feature_type"]),
+            str(item["identifier"]),
+        ),
+    ):
+        identifier = str(binding["identifier"])
+        if binding["feature_type"] == "property":
+            metadata = binding.get("read_binding") or {}
+            properties.append(
+                {
+                    "identifier": identifier,
+                    "name": str(metadata.get("name") or identifier),
+                    "accessMode": str(
+                        metadata.get("access_mode")
+                        or (
+                            "rw"
+                            if binding.get("write_binding") is not None
+                            else "r"
+                        )
+                    ),
+                    "required": False,
+                    "dataType": metadata.get("data_type")
+                    or inferred_data_type(
+                        identifier,
+                        device.state.values.get(identifier),
+                    ),
+                }
+            )
+        elif binding["feature_type"] == "service":
+            metadata = binding.get("write_binding") or {}
+            services.append(
+                {
+                    "identifier": identifier,
+                    "name": str(metadata.get("name") or identifier),
+                    "callType": str(metadata.get("call_type") or "async"),
+                    "inputData": list(metadata.get("input_data") or []),
+                    "outputData": list(metadata.get("output_data") or []),
+                }
+            )
+        elif binding["feature_type"] == "event":
+            metadata = binding.get("read_binding") or {}
+            events.append(
+                {
+                    "identifier": identifier,
+                    "name": str(metadata.get("name") or identifier),
+                    "type": str(metadata.get("event_type") or "info"),
+                    "outputData": list(metadata.get("output_data") or []),
+                }
+            )
     return {
         "schema": "https://iotx-tsl.aliyuncs.com/schema.json",
         "profile": {"productKey": device.product_key},
-        "properties": [
-            {
-                "identifier": identifier,
-                "name": identifier,
-                "accessMode": (
-                    "rw"
-                    if bindings.get(identifier, {}).get("write_binding") is not None
-                    or identifier in device.state.values
-                    and identifier != "CurrentTemperature"
-                    else "r"
-                ),
-                "dataType": _inferred_data_type(
-                    identifier, device.state.values.get(identifier)
-                ),
-            }
-            for identifier in identifiers
-        ],
-        "services": [],
-        "events": [],
+        "properties": properties,
+        "services": services,
+        "events": events,
     }
 
 
-def _inferred_data_type(identifier: str, value: object) -> dict[str, object]:
+def inferred_data_type(
+    identifier: str, value: object
+) -> dict[str, object]:
+    capability = identifier.rsplit("_", 1)[0]
     if isinstance(value, bool):
         return {"type": "bool", "specs": {}}
     if isinstance(value, int):
-        specs = {"min": 0, "max": 100} if identifier == "Brightness" else {}
+        specs = (
+            {"min": 0, "max": 100}
+            if capability == "Brightness"
+            else {}
+        )
         return {"type": "int", "specs": specs}
     if isinstance(value, float):
         return {"type": "double", "specs": {}}
-    if identifier == "LockState":
-        return {"type": "enum", "specs": {"LOCK": "Locked", "UNLOCK": "Unlocked"}}
+    if capability == "LockState":
+        return {
+            "type": "enum",
+            "specs": {"LOCK": "Locked", "UNLOCK": "Unlocked"},
+        }
     return {"type": "text", "specs": {"length": 4096}}

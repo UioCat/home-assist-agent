@@ -59,9 +59,15 @@ export interface ThingModelVersion {
   created_at: string;
 }
 
+export interface ThingModelImportResult {
+  product: ThingProduct;
+  model: ThingModelVersion;
+}
+
 export interface Device {
   device_id: string;
   product_id: string | null;
+  model_version_id: string | null;
   provider_id: string;
   display_name: string;
   area: string | null;
@@ -102,6 +108,7 @@ export interface DeviceDetail {
   bindings: ProviderBinding[];
   feature_bindings: FeatureBinding[];
   model_versions: ThingModelVersion[];
+  bound_model: ThingModelVersion | null;
 }
 
 export interface DeviceState {
@@ -194,7 +201,11 @@ export interface IoTApi {
   createSession(adminToken: string): Promise<void>;
   listThingModels(): Promise<ThingProduct[]>;
   listThingModelVersions(productId: string): Promise<ThingModelVersion[]>;
+  importThingModel(name: string, tsl: TslDocument): Promise<ThingModelImportResult>;
   validateThingModel(modelId: string): Promise<{ valid: boolean; model_version_id: string }>;
+  publishThingModel(modelId: string): Promise<ThingModelVersion>;
+  archiveThingModel(modelId: string): Promise<ThingModelVersion>;
+  exportThingModel(modelId: string): Promise<TslDocument>;
   listDevices(): Promise<Device[]>;
   getDevice(deviceId: string): Promise<DeviceDetail>;
   getDeviceState(deviceId: string): Promise<DeviceState>;

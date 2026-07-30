@@ -34,8 +34,10 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await container.startup()
-        yield
-        await container.shutdown()
+        try:
+            yield
+        finally:
+            await container.shutdown()
 
     app = FastAPI(title="IoT MCP", version="0.1.0", lifespan=lifespan)
     app.state.settings = settings

@@ -199,4 +199,71 @@ describe("HttpApiClient authentication", () => {
       expect.objectContaining({ "Idempotency-Key": expect.any(String) }),
     );
   });
+
+  it("uses the draft model lifecycle API contracts", async () => {
+    const tsl = {
+      schema: "https://iotx-tsl.example/schema.json",
+      profile: { productKey: "manual-model" },
+      properties: [],
+      services: [],
+      events: [],
+    };
+    const model = {
+      model_version_id: "model-1",
+      product_id: "product-1",
+      version: 1,
+      status: "draft",
+      tsl_json: tsl,
+      created_at: "2026-07-30T00:00:00Z",
+    };
+    const json = (body: unknown) =>
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        json({ csrf_token: "csrf-model", expires_at: "future" }),
+      )
+      .mockResolvedValueOnce(
+        json({
+          product: {
+            product_id: "product-1",
+            product_key: "manual-model",
+            name: "Manual model",
+            source: "http",
+            capability_fingerprint: "fingerprint",
+            created_at: "2026-07-30T00:00:00Z",
+          },
+          model,
+        }),
+      )
+      .mockResolvedValueOnce(json({ ...model, status: "active" }))
+      .mockResolvedValueOnce(json({ ...model, status: "archived" }))
+      .mockResolvedValueOnce(json(tsl));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new HttpApiClient();
+
+    await client.bootstrapSession();
+    await client.importThingModel("Manual model", tsl);
+    await client.publishThingModel("model-1");
+    await client.archiveThingModel("model-1");
+    await client.exportThingModel("model-1");
+
+    expect(fetchMock.mock.calls.slice(1).map(([url]) => url)).toEqual([
+      "/api/v1/thing-models",
+      "/api/v1/thing-models/model-1:publish",
+      "/api/v1/thing-models/model-1:archive",
+      "/api/v1/thing-models/model-1:export",
+    ]);
+    expect(fetchMock.mock.calls[1][1]).toMatchObject({
+      method: "POST",
+      body: JSON.stringify({ name: "Manual model", tsl }),
+      headers: expect.objectContaining({
+        "X-CSRF-Token": "csrf-model",
+      }),
+    });
+    expect(fetchMock.mock.calls[4][1]?.method).toBe("GET");
+  });
 });

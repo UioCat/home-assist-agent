@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any
 
@@ -21,7 +22,7 @@ from iot_mcp.adapters.outbound.persistence.tables import (
     ThingProductTable,
     WebhookNonceTable,
 )
-from iot_mcp.domain.enums import ConfirmationDecision, OperationStatus
+from iot_mcp.domain.enums import ConfirmationDecision, ModelStatus, OperationStatus
 from iot_mcp.domain.models import (
     ConfirmationRequest,
     ControlOperation,
@@ -41,6 +42,29 @@ def _values(model: Any) -> dict[str, Any]:
 
 
 _UNSET = object()
+
+
+class IdempotencyConflictError(ValueError):
+    """The same key was reused for a semantically different immutable request."""
+
+
+def _operation_request_identity(operation: ControlOperation) -> tuple[object, ...]:
+    """Compare legacy rows without a fingerprint against the immutable request."""
+    return (
+        operation.device_id,
+        operation.initiator,
+        operation.interaction_mode.value,
+        json.dumps(
+            operation.action,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        operation.binding_id,
+        operation.provider_id,
+        operation.provider_type,
+        operation.external_device_ref,
+        operation.binding_revision,
+    )
 
 
 class ThingModelRepository:
@@ -88,6 +112,90 @@ class ThingModelRepository:
             session.add(ThingModelVersionTable(**_values(model)))
             await session.commit()
             return model
+
+    async def add_active_model_version(
+        self, model: ThingModelVersion
+    ) -> ThingModelVersion:
+        if model.status is not ModelStatus.ACTIVE:
+            raise ValueError("generated model must be active")
+        async with self._sessions() as session:
+            await session.execute(
+                update(ThingModelVersionTable)
+                .where(
+                    ThingModelVersionTable.product_id == model.product_id,
+                    ThingModelVersionTable.status == ModelStatus.ACTIVE.value,
+                )
+                .values(status=ModelStatus.ARCHIVED.value)
+            )
+            session.add(ThingModelVersionTable(**_values(model)))
+            await session.commit()
+            return model
+
+    async def set_model_status(
+        self, model_version_id: str, status: ModelStatus
+    ) -> ThingModelVersion:
+        async with self._sessions() as session:
+            row = await session.get(ThingModelVersionTable, model_version_id)
+            if row is None:
+                raise KeyError(f"unknown model version: {model_version_id}")
+            row.status = status.value
+            await session.commit()
+            return ThingModelVersion.model_validate(row)
+
+    async def publish_model_version(
+        self, model_version_id: str
+    ) -> ThingModelVersion:
+        async with self._sessions() as session:
+            row = await session.get(ThingModelVersionTable, model_version_id)
+            if row is None:
+                raise KeyError(f"unknown model version: {model_version_id}")
+            if row.status != ModelStatus.DRAFT.value:
+                raise ValueError(
+                    f"only draft model versions can be published: {model_version_id}"
+                )
+            await session.execute(
+                update(ThingModelVersionTable)
+                .where(
+                    ThingModelVersionTable.product_id == row.product_id,
+                    ThingModelVersionTable.status == ModelStatus.ACTIVE.value,
+                    ThingModelVersionTable.model_version_id != model_version_id,
+                )
+                .values(status=ModelStatus.ARCHIVED.value)
+            )
+            row.status = ModelStatus.ACTIVE.value
+            await session.execute(
+                update(DeviceInstanceTable)
+                .where(DeviceInstanceTable.product_id == row.product_id)
+                .values(model_version_id=model_version_id, updated_at=utc_now())
+            )
+            await session.execute(
+                update(FeatureBindingTable)
+                .where(
+                    FeatureBindingTable.device_id.in_(
+                        select(DeviceInstanceTable.device_id).where(
+                            DeviceInstanceTable.product_id == row.product_id
+                        )
+                    )
+                )
+                .values(model_version_id=model_version_id)
+            )
+            await session.commit()
+            return ThingModelVersion.model_validate(row)
+
+    async def archive_model_version(
+        self, model_version_id: str
+    ) -> ThingModelVersion:
+        async with self._sessions() as session:
+            row = await session.get(ThingModelVersionTable, model_version_id)
+            if row is None:
+                raise KeyError(f"unknown model version: {model_version_id}")
+            if row.status != ModelStatus.DRAFT.value:
+                raise ValueError(
+                    f"only draft model versions can be archived: {model_version_id}"
+                )
+            row.status = ModelStatus.ARCHIVED.value
+            await session.commit()
+            return ThingModelVersion.model_validate(row)
 
     async def get_model_version(self, model_version_id: str) -> ThingModelVersion | None:
         async with self._sessions() as session:
@@ -209,6 +317,23 @@ class DeviceRepository:
             )
             return ProviderDeviceBinding.model_validate(row) if row else None
 
+    async def get_binding_by_provider_ref(
+        self,
+        provider_id: str,
+        provider_type: str,
+        external_device_ref: str,
+    ) -> ProviderDeviceBinding | None:
+        async with self._sessions() as session:
+            row = await session.scalar(
+                select(ProviderDeviceBindingTable).where(
+                    ProviderDeviceBindingTable.provider_id == provider_id,
+                    ProviderDeviceBindingTable.provider_type == provider_type,
+                    ProviderDeviceBindingTable.external_device_ref
+                    == external_device_ref,
+                )
+            )
+            return ProviderDeviceBinding.model_validate(row) if row else None
+
     async def upsert_feature_binding(self, binding: FeatureBinding) -> FeatureBinding:
         async with self._sessions() as session:
             row = await session.scalar(
@@ -234,6 +359,21 @@ class DeviceRepository:
                 select(FeatureBindingTable).where(FeatureBindingTable.device_id == device_id)
             )
             return [FeatureBinding.model_validate(row) for row in rows]
+
+    async def replace_feature_bindings(
+        self, device_id: str, bindings: list[FeatureBinding]
+    ) -> list[FeatureBinding]:
+        async with self._sessions() as session:
+            await session.execute(
+                delete(FeatureBindingTable).where(
+                    FeatureBindingTable.device_id == device_id
+                )
+            )
+            session.add_all(
+                [FeatureBindingTable(**_values(binding)) for binding in bindings]
+            )
+            await session.commit()
+            return bindings
 
 
 class StateRepository:
@@ -294,7 +434,7 @@ class OperationRepository:
     async def create_operation(self, operation: ControlOperation) -> ControlOperation:
         existing = await self.get_by_idempotency_key(operation.idempotency_key)
         if existing:
-            return existing
+            return self._matching_idempotent_operation(existing, operation)
         async with self._sessions() as session:
             session.add(ControlOperationTable(**_values(operation)))
             try:
@@ -307,9 +447,29 @@ class OperationRepository:
                     )
                 )
                 if row is not None:
-                    return ControlOperation.model_validate(row)
+                    return self._matching_idempotent_operation(
+                        ControlOperation.model_validate(row), operation
+                    )
                 raise
             return operation
+
+    @staticmethod
+    def _matching_idempotent_operation(
+        existing: ControlOperation, proposed: ControlOperation
+    ) -> ControlOperation:
+        if (
+            existing.request_fingerprint is not None
+            and proposed.request_fingerprint is not None
+            and existing.request_fingerprint == proposed.request_fingerprint
+        ):
+            return existing
+        if _operation_request_identity(existing) == _operation_request_identity(
+            proposed
+        ):
+            return existing
+        raise IdempotencyConflictError(
+            "idempotency key belongs to a different request"
+        )
 
     async def get_operation(self, operation_id: str) -> ControlOperation | None:
         async with self._sessions() as session:

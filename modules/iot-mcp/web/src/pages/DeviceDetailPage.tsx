@@ -31,7 +31,7 @@ export function DeviceDetailPage() {
   if (query.error || !query.data) return <div className="page"><ErrorState error={query.error} onRetry={query.reload} /></div>;
 
   const { detail, state, operations, events } = query.data;
-  const model = detail.model_versions[0];
+  const model = detail.bound_model;
   const riskFor = (identifier: string) =>
     detail.feature_bindings.find((binding) => binding.identifier === identifier)?.risk_level ??
     detail.device.risk_level;

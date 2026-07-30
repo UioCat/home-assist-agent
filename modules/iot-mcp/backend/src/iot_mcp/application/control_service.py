@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from iot_mcp.adapters.outbound.persistence.repositories import (
     ConfirmationRepository,
     DeviceRepository,
+    IdempotencyConflictError,
     OperationRepository,
     ThingModelRepository,
 )
@@ -20,6 +21,12 @@ from iot_mcp.application.policy import (
     SafeControlError,
     TrustedPrincipal,
     canonical_action_hash,
+    canonical_request_fingerprint,
+)
+from iot_mcp.application.safe_dto import (
+    operation_public_dto,
+    redact_sensitive,
+    safe_action_dto,
 )
 from iot_mcp.domain.enums import (
     ConfirmationDecision,
@@ -27,7 +34,12 @@ from iot_mcp.domain.enums import (
     OperationStatus,
     RiskLevel,
 )
-from iot_mcp.domain.models import ConfirmationRequest, ControlOperation, utc_now
+from iot_mcp.domain.models import (
+    ConfirmationRequest,
+    ControlOperation,
+    DeviceInstance,
+    utc_now,
+)
 from iot_mcp.domain.tsl import TslDocument, TslValidationError
 from iot_mcp.ports.device_provider import DeviceProvider, ProviderResult
 from iot_mcp.ports.message_channel import MessageChannel
@@ -74,10 +86,6 @@ class ControlService:
     ) -> ControlOperation:
         if not idempotency_key:
             raise SafeControlError("idempotency_key_required", "Idempotency-Key is required")
-        existing = await self._operations.get_by_idempotency_key(idempotency_key)
-        if existing is not None:
-            return existing
-
         device = await self._devices.get_device(device_id)
         if device is None:
             raise SafeControlError("target_not_found", "device was not found", status_code=404)
@@ -86,7 +94,7 @@ class ControlService:
             raise SafeControlError(
                 "binding_not_found", "device binding was not found", status_code=409
             )
-        await self._validate_action(device_id, device.product_id, action)
+        await self._validate_action(device, action)
         risk = await self._resolve_risk(device_id, device.risk_level, action)
         target = BoundTarget(
             binding_id=binding.binding_id,
@@ -103,9 +111,21 @@ class ControlService:
             action=action.model_dump(mode="json"),
             **target.model_dump(),
             idempotency_key=idempotency_key,
+            request_fingerprint=canonical_request_fingerprint(
+                device_id,
+                action,
+                target=target,
+                principal=principal,
+            ),
         )
         try:
             operation = await self._operations.create_operation(proposed)
+        except IdempotencyConflictError as error:
+            raise SafeControlError(
+                "idempotency_conflict",
+                "Idempotency-Key belongs to a different request",
+                status_code=409,
+            ) from error
         except Exception as error:
             raise SafeControlError(
                 "audit_unavailable",
@@ -217,7 +237,7 @@ class ControlService:
             return await self._operations.update_operation(
                 operation.operation_id,
                 status=OperationStatus.UNKNOWN,
-                result={"code": "provider_timeout", "retryable": True},
+                result={"code": "provider_timeout", "retryable": False},
             )
         except Exception:
             return await self._operations.update_operation(
@@ -235,14 +255,25 @@ class ControlService:
         action: ControlAction,
         provider_result: ProviderResult,
     ) -> ControlOperation:
+        if provider_result.error_code == "provider_timeout":
+            return await self._operations.update_operation(
+                operation.operation_id,
+                status=OperationStatus.UNKNOWN,
+                provider_result={
+                    "ok": False,
+                    "error_code": "provider_timeout",
+                    "data": {},
+                },
+                result={"code": "provider_timeout", "retryable": False},
+            )
         status = self._result_status(action, provider_result)
         result = (
-            {"data": _redact(provider_result.data)}
+            {"data": redact_sensitive(provider_result.data)}
             if provider_result.ok
             else {
                 "code": provider_result.error_code or "provider_failed",
                 "message": "provider rejected the operation",
-                "retryable": False,
+                "retryable": provider_result.error_code == "provider_offline",
             }
         )
         return await self._operations.update_operation(
@@ -251,7 +282,7 @@ class ControlService:
             provider_result={
                 "ok": provider_result.ok,
                 "error_code": provider_result.error_code,
-                "data": _redact(provider_result.data),
+                "data": redact_sensitive(provider_result.data),
             },
             result=result,
         )
@@ -272,7 +303,7 @@ class ControlService:
         return OperationStatus.ACCEPTED
 
     async def _validate_action(
-        self, device_id: str, product_id: str | None, action: ControlAction
+        self, device: DeviceInstance, action: ControlAction
     ) -> None:
         if action.kind == "properties" and not action.values:
             raise SafeControlError(
@@ -280,12 +311,27 @@ class ControlService:
             )
         if action.kind == "service" and not action.service:
             raise SafeControlError("invalid_action", "service is required", status_code=422)
-        if self._models is None or product_id is None:
+        if self._models is None or device.product_id is None:
             return
-        versions = await self._models.list_model_versions(product_id)
-        active = next((item for item in versions if item.status is ModelStatus.ACTIVE), None)
-        if active is None:
-            return
+        if device.model_version_id is None:
+            raise SafeControlError(
+                "model_binding_missing",
+                "device has no bound thing model version",
+                status_code=409,
+            )
+        active = await self._models.get_model_version(device.model_version_id)
+        if active is None or active.product_id != device.product_id:
+            raise SafeControlError(
+                "model_binding_invalid",
+                "device thing model binding is invalid",
+                status_code=409,
+            )
+        if active.status is not ModelStatus.ACTIVE:
+            raise SafeControlError(
+                "model_not_active",
+                "device thing model version is not active",
+                status_code=409,
+            )
         try:
             document = TslDocument.model_validate(active.tsl_json)
             if action.kind == "properties":
@@ -311,9 +357,7 @@ class ControlService:
 
     @staticmethod
     def _provider_request(action: ControlAction) -> dict[str, object]:
-        if action.kind == "properties":
-            return {"kind": action.kind, "values": action.values}
-        return {"kind": action.kind, "service": action.service, "inputs": action.inputs}
+        return safe_action_dto(action)
 
     async def _notify_confirmation_safely(
         self, confirmation: ConfirmationRequest, action: ControlAction
@@ -326,7 +370,7 @@ class ControlService:
                     "confirmation_id": confirmation.confirmation_id,
                     "action_hash": confirmation.action_hash,
                     "expires_at": confirmation.expires_at.isoformat(),
-                    "action": action.model_dump(mode="json"),
+                    "action": safe_action_dto(action),
                 }
             )
         except Exception:
@@ -337,32 +381,10 @@ class ControlService:
             return
         try:
             await self._message_channel.send_result(
-                {
-                    "operation_id": operation.operation_id,
-                    "status": operation.status.value,
-                    "result": operation.result,
-                }
+                operation_public_dto(operation)
             )
         except Exception:
             pass
-
-
-def _redact(value: object) -> object:
-    if isinstance(value, dict):
-        return {
-            key: (
-                "[REDACTED]"
-                if any(
-                    word in key.lower()
-                    for word in ("token", "secret", "password", "authorization")
-                )
-                else _redact(item)
-            )
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [_redact(item) for item in value]
-    return value
 
 
 def _operation_target(operation: ControlOperation) -> BoundTarget | None:

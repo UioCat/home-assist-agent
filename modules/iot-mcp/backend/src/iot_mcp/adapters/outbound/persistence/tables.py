@@ -63,6 +63,9 @@ class DeviceInstanceTable(Base):
     product_id: Mapped[str | None] = mapped_column(
         ForeignKey("thing_products.product_id"), index=True
     )
+    model_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("thing_model_versions.model_version_id"), index=True
+    )
     provider_id: Mapped[str] = mapped_column(String(255), index=True)
     display_name: Mapped[str] = mapped_column(String(255))
     area: Mapped[str | None] = mapped_column(String(255))
@@ -158,6 +161,7 @@ class ControlOperationTable(Base):
     binding_revision: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(32), index=True)
     idempotency_key: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    request_fingerprint: Mapped[str | None] = mapped_column(String(64), index=True)
     provider_request: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     provider_result: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     result: Mapped[dict[str, Any] | None] = mapped_column(JSON)

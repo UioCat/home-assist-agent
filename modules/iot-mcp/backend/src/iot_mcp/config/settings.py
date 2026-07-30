@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     home_assistant_url: str | None = None
     home_assistant_token: str | None = None
     home_assistant_timeout_seconds: float = Field(default=10, gt=0)
+    reconcile_interval_seconds: float = Field(default=600, gt=0)
+    provider_reconnect_delay_seconds: float = Field(default=1, gt=0)
     admin_token: str = ""
     machine_tokens: dict[str, str] = Field(default_factory=dict)
     session_signing_secret: str = Field(default_factory=lambda: secrets.token_urlsafe(32))

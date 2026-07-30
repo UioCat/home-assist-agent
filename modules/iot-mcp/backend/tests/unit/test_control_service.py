@@ -17,8 +17,18 @@ from iot_mcp.adapters.outbound.persistence.repositories import (
 from iot_mcp.application.confirmation_service import ConfirmationService
 from iot_mcp.application.control_service import ControlService
 from iot_mcp.application.policy import ControlAction, SafeControlError, TrustedPrincipal
-from iot_mcp.domain.enums import ConfirmationDecision, OperationStatus, RiskLevel
-from iot_mcp.domain.models import DeviceInstance, ProviderDeviceBinding
+from iot_mcp.domain.enums import (
+    ConfirmationDecision,
+    ModelStatus,
+    OperationStatus,
+    RiskLevel,
+)
+from iot_mcp.domain.models import (
+    DeviceInstance,
+    ProviderDeviceBinding,
+    ThingModelVersion,
+    ThingProduct,
+)
 from iot_mcp.ports.device_provider import ProviderResult
 
 
@@ -151,6 +161,121 @@ async def test_idempotency_and_no_op_do_not_repeat_provider_calls(tmp_path) -> N
 
 
 @pytest.mark.asyncio
+async def test_idempotency_key_reuse_with_different_semantics_fails_closed(tmp_path) -> None:
+    engine, provider, _, _, confirmations, control, _ = await _services(
+        tmp_path, risk=RiskLevel.HIGH
+    )
+
+    first = await control.submit(
+        device_id="device-1",
+        action=ControlAction.properties({"LockState": "UNLOCK"}),
+        principal=TrustedPrincipal.mcp("caller-1"),
+        idempotency_key="semantic-key",
+    )
+    duplicate = await control.submit(
+        device_id="device-1",
+        action=ControlAction.properties({"LockState": "UNLOCK"}),
+        principal=TrustedPrincipal.mcp("caller-1"),
+        idempotency_key="semantic-key",
+    )
+
+    with pytest.raises(SafeControlError) as action_conflict:
+        await control.submit(
+            device_id="device-1",
+            action=ControlAction.properties({"LockState": "LOCK"}),
+            principal=TrustedPrincipal.mcp("caller-1"),
+            idempotency_key="semantic-key",
+        )
+    with pytest.raises(SafeControlError) as principal_conflict:
+        await control.submit(
+            device_id="device-1",
+            action=ControlAction.properties({"LockState": "UNLOCK"}),
+            principal=TrustedPrincipal.mcp("caller-2"),
+            idempotency_key="semantic-key",
+        )
+
+    assert duplicate.operation_id == first.operation_id
+    assert action_conflict.value.code == "idempotency_conflict"
+    assert principal_conflict.value.code == "idempotency_conflict"
+    assert len(await confirmations.list_requests()) == 1
+    assert provider.calls == 0
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_product_device_without_active_bound_model_fails_closed(tmp_path) -> None:
+    engine, provider, devices, operations, confirmations, _, _ = await _services(
+        tmp_path, risk=RiskLevel.LOW
+    )
+    sessions = create_session_factory(engine)
+    from iot_mcp.adapters.outbound.persistence.repositories import ThingModelRepository
+
+    models = ThingModelRepository(sessions)
+    product = await models.upsert_product(
+        ThingProduct(
+            product_key="manual-model",
+            name="Manual model",
+            source="manual",
+            capability_fingerprint="fingerprint",
+        )
+    )
+    draft = await models.add_model_version(
+        ThingModelVersion(
+            product_id=product.product_id,
+            version=1,
+            status=ModelStatus.DRAFT,
+            tsl_json={
+                "schema": "https://iotx-tsl.aliyuncs.com/schema.json",
+                "profile": {"productKey": "manual-model"},
+                "properties": [],
+                "services": [],
+                "events": [],
+            },
+        )
+    )
+    device = await devices.get_device("device-1")
+    assert device is not None
+    await devices.upsert_device(
+        device.model_copy(
+            update={"product_id": product.product_id, "model_version_id": None}
+        )
+    )
+    control = ControlService(
+        devices=devices,
+        operations=operations,
+        confirmations=confirmations,
+        providers={provider.provider_id: provider},
+        confirmation_actor="owner",
+        models=models,
+    )
+
+    with pytest.raises(SafeControlError) as unbound:
+        await control.submit(
+            device_id="device-1",
+            action=ControlAction.properties({"PowerSwitch": False}),
+            principal=TrustedPrincipal.web_session("owner"),
+            idempotency_key="unbound-model",
+        )
+    rebound = await devices.get_device("device-1")
+    assert rebound is not None
+    await devices.upsert_device(
+        rebound.model_copy(update={"model_version_id": draft.model_version_id})
+    )
+    with pytest.raises(SafeControlError) as draft_bound:
+        await control.submit(
+            device_id="device-1",
+            action=ControlAction.properties({"PowerSwitch": False}),
+            principal=TrustedPrincipal.web_session("owner"),
+            idempotency_key="draft-model",
+        )
+
+    assert unbound.value.code == "model_binding_missing"
+    assert draft_bound.value.code == "model_not_active"
+    assert provider.calls == 0
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_provider_timeout_is_unknown(tmp_path) -> None:
     provider = CountingProvider(timeout=True)
     engine, _, _, _, _, control, _ = await _services(
@@ -165,7 +290,7 @@ async def test_provider_timeout_is_unknown(tmp_path) -> None:
     )
 
     assert operation.status is OperationStatus.UNKNOWN
-    assert operation.result == {"code": "provider_timeout", "retryable": True}
+    assert operation.result == {"code": "provider_timeout", "retryable": False}
     await engine.dispose()
 
 

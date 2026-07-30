@@ -9,13 +9,11 @@ from httpx import ASGITransport, AsyncClient
 from iot_mcp.adapters.outbound.mock.provider import MockDeviceProvider
 from iot_mcp.bootstrap.runtime import build_runtime
 from iot_mcp.config.settings import Settings
-from iot_mcp.domain.models import DeviceInstance, ProviderDeviceBinding
 
 
 class RecordingMockProvider(MockDeviceProvider):
     def __init__(self) -> None:
         super().__init__()
-        self._states["mock:service:e2e"] = {"Level": 0}
         self.writes: list[tuple[str, dict[str, Any]]] = []
         self.service_calls: list[tuple[str, str, dict[str, Any]]] = []
 
@@ -79,21 +77,6 @@ async def test_built_console_and_http_surfaces_control_real_mock_state(
     )
     await runtime.startup()
     try:
-        await runtime.container.devices.upsert_device(
-            DeviceInstance(
-                device_id="e2e-service-device",
-                provider_id="mock",
-                display_name="E2E service target",
-            )
-        )
-        await runtime.container.devices.upsert_binding(
-            ProviderDeviceBinding(
-                device_id="e2e-service-device",
-                provider_id="mock",
-                provider_type="mock",
-                external_device_ref="mock:service:e2e",
-            )
-        )
         async with AsyncClient(
             transport=ASGITransport(app=runtime.http_app),
             base_url="https://iot-mcp.test",
@@ -131,6 +114,13 @@ async def test_built_console_and_http_surfaces_control_real_mock_state(
             ).json()
             door = next(item for item in devices if item["display_name"] == "Front door")
             light = next(item for item in devices if item["display_name"] == "Desk light")
+            climate = next(
+                item for item in devices if item["display_name"] == "Living room AC"
+            )
+            assert all(
+                item["product_id"] and item["model_version_id"]
+                for item in (door, light, climate)
+            )
 
             direct = await client.post(
                 f"/api/v1/devices/{door['device_id']}/properties:write",
@@ -155,21 +145,25 @@ async def test_built_console_and_http_surfaces_control_real_mock_state(
             assert door_state.json()["values"]["LockState"] == "UNLOCK"
 
             service = await client.post(
-                "/api/v1/devices/e2e-service-device/services/SetLevel:invoke",
+                f"/api/v1/devices/{climate['device_id']}/services/SetTemperature:invoke",
                 headers={
                     "X-CSRF-Token": csrf,
                     "Idempotency-Key": "e2e-human-service",
                 },
-                json={"inputs": {"Level": 7}},
+                json={"inputs": {"temperature": 24}},
             )
             assert service.status_code == 200
             assert service.json()["status"] == "accepted"
             assert provider.service_calls == [
-                ("mock:service:e2e", "SetLevel", {"Level": 7})
+                (
+                    "mock:climate:living_room",
+                    "SetTemperature",
+                    {"temperature": 24},
+                )
             ]
             assert (
-                await provider.read_state("mock:service:e2e")
-            ).values == {"Level": 7, "service": "SetLevel"}
+                await provider.read_state("mock:climate:living_room")
+            ).values["TargetTemperature"] == 24
 
             machine_headers = {
                 "Authorization": "Bearer example-machine-token",
@@ -191,10 +185,6 @@ async def test_built_console_and_http_surfaces_control_real_mock_state(
             assert duplicate.json()["operation_id"] == first.json()["operation_id"]
             assert provider.writes == [
                 ("mock:lock:front_door", {"LockState": "UNLOCK"}),
-                (
-                    "mock:service:e2e",
-                    {"Level": 7, "service": "SetLevel"},
-                ),
                 ("mock:light:desk", {"Brightness": 61}),
             ]
             light_state = await client.get(

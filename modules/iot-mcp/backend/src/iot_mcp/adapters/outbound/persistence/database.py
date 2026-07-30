@@ -46,6 +46,11 @@ async def initialize_database(engine: AsyncEngine) -> None:
 async def _migrate_sqlite_schema(connection: AsyncConnection) -> None:
     await _add_sqlite_columns(
         connection,
+        "device_instances",
+        {"model_version_id": "VARCHAR(36)"},
+    )
+    await _add_sqlite_columns(
+        connection,
         "provider_device_bindings",
         {"provider_id": "VARCHAR(255)"},
     )
@@ -58,6 +63,7 @@ async def _migrate_sqlite_schema(connection: AsyncConnection) -> None:
             "provider_type": "VARCHAR(64)",
             "external_device_ref": "VARCHAR(512)",
             "binding_revision": "INTEGER",
+            "request_fingerprint": "VARCHAR(64)",
         },
     )
     await _add_sqlite_columns(
@@ -82,6 +88,24 @@ async def _migrate_sqlite_schema(connection: AsyncConnection) -> None:
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_device_provider_binding "
             "ON provider_device_bindings (device_id, provider_id) "
             "WHERE provider_id IS NOT NULL"
+        )
+    )
+    await connection.execute(
+        text(
+            "UPDATE thing_model_versions "
+            "SET status = 'archived' "
+            "WHERE status = 'active' AND model_version_id NOT IN ("
+            "SELECT model_version_id FROM thing_model_versions newest "
+            "WHERE newest.status = 'active' "
+            "AND newest.product_id = thing_model_versions.product_id "
+            "ORDER BY newest.version DESC LIMIT 1"
+            ")"
+        )
+    )
+    await connection.execute(
+        text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_active_model_per_product "
+            "ON thing_model_versions (product_id) WHERE status = 'active'"
         )
     )
 

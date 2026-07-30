@@ -4,6 +4,8 @@ import type {
   IoTApi,
   OperationResult,
   SyncResult,
+  ThingModelImportResult,
+  TslDocument,
 } from "./types";
 import {
   buildDemoDeviceDetail,
@@ -46,8 +48,86 @@ export class DemoApiClient implements IoTApi {
     );
   }
 
+  async importThingModel(
+    name: string,
+    tsl: TslDocument,
+  ): Promise<ThingModelImportResult> {
+    const productKey = String(tsl.profile.productKey ?? "");
+    if (!productKey) throw new Error("profile.productKey is required");
+    let product = this.catalog.products.find(
+      (item) => item.product_key === productKey,
+    );
+    if (!product) {
+      product = {
+        product_id: `demo-product-${this.catalog.products.length + 1}`,
+        product_key: productKey,
+        name,
+        source: "http",
+        capability_fingerprint: `demo:${productKey}`,
+        created_at: DEMO_TIMESTAMP,
+      };
+      this.catalog.products.push(product);
+    }
+    const versions = this.catalog.models.filter(
+      (item) => item.product_id === product.product_id,
+    );
+    const model = {
+      model_version_id: `demo-model-${this.catalog.models.length + 1}`,
+      product_id: product.product_id,
+      version: Math.max(0, ...versions.map((item) => item.version)) + 1,
+      status: "draft",
+      tsl_json: structuredClone(tsl),
+      created_at: DEMO_TIMESTAMP,
+    };
+    this.catalog.models.push(model);
+    return structuredClone({ product, model });
+  }
+
   async validateThingModel(modelId: string) {
     return { valid: true, model_version_id: modelId };
+  }
+
+  async publishThingModel(modelId: string) {
+    const model = this.catalog.models.find(
+      (item) => item.model_version_id === modelId,
+    );
+    if (!model || model.status !== "draft") {
+      throw new Error("only a draft model can be published");
+    }
+    for (const candidate of this.catalog.models) {
+      if (
+        candidate.product_id === model.product_id
+        && candidate.status === "active"
+      ) {
+        candidate.status = "archived";
+      }
+    }
+    model.status = "active";
+    for (const device of this.catalog.devices) {
+      if (device.product_id === model.product_id) {
+        device.model_version_id = model.model_version_id;
+      }
+    }
+    return structuredClone(model);
+  }
+
+  async archiveThingModel(modelId: string) {
+    const model = this.catalog.models.find(
+      (item) => item.model_version_id === modelId,
+    );
+    if (!model || model.status !== "draft") {
+      throw new Error("only a draft model can be archived");
+    }
+    model.status = "archived";
+    return structuredClone(model);
+  }
+
+  async exportThingModel(modelId: string) {
+    const model = this.catalog.models.find(
+      (item) => item.model_version_id === modelId,
+    );
+    if (!model) throw new Error("model not found");
+    return structuredClone(model.tsl_json);
   }
 
   async listDevices() {

@@ -61,6 +61,8 @@ MCP 和 HTTP 是独立进程入口；需要同时提供两者时启动两个进�
 | `IOT_MCP_DATABASE_URL` | `sqlite+aiosqlite:///./iot_mcp.db` | SQLite async URL |
 | `IOT_MCP_WEB_DIST_PATH` | 模块内 `web/dist` | 构建产物目录 |
 | `IOT_MCP_MOCK_PROVIDER_ENABLED` | `true` | 开箱可用的 Mock Provider |
+| `IOT_MCP_RECONCILE_INTERVAL_SECONDS` | `600` | Provider 全量对账间隔 |
+| `IOT_MCP_PROVIDER_RECONNECT_DELAY_SECONDS` | `1` | Provider 事件订阅断开后的重连等待 |
 | `IOT_MCP_ADMIN_TOKEN` | 空 | 创建 Web Session；必须显式设置 |
 | `IOT_MCP_MACHINE_TOKENS` | `{}` | JSON 对象：`token -> actor id` |
 | `IOT_MCP_SESSION_SIGNING_SECRET` | 进程随机值 | 生产必须固定注入，否则重启后 Session 失效 |
@@ -87,10 +89,11 @@ uv run python -m iot_mcp --mode http
 | --- | --- | --- |
 | REST | `GET /api/states` | 初始实体与状态同步 |
 | REST | `GET /api/states/{entity_id}` | 控制前后与实时状态读取 |
+| REST | `GET /api/config`、`GET /api/services` | HA 实例元数据与可调用 Service 发现 |
 | REST | `POST /api/services/{domain}/{service}` | 真实设备控制 |
 | WebSocket | `/api/websocket` 的 `auth_required -> auth -> auth_ok` | WS 鉴权 |
-| WebSocket | `config/entity_registry/list`，按 command `id` 关联响应 | Entity Registry 到 Device 的稳定归属 |
-| WebSocket | `subscribe_events`，`event_type=state_changed` | Provider 事件订阅能力 |
+| WebSocket | `config/entity_registry/list`、`config/device_registry/list`、`config/area_registry/list` | Entity、Device 与 Area 的稳定归属和展示元数据 |
+| WebSocket | `subscribe_events`，`event_type=state_changed` | 实时状态事件 |
 
 真实控制只使用 HA Service API。`POST /api/states/{entity_id}` 只改变 HA 状态表示，不控制实体，本模块禁止用它控制设备。协议与注册表语义以 HA 官方文档为准：
 
@@ -99,7 +102,13 @@ uv run python -m iot_mcp --mode http
 - [Device Registry](https://developers.home-assistant.io/docs/device_registry_index/)
 - [Entity Registry](https://developers.home-assistant.io/docs/entity_registry_index/)
 
-当前独立 Runtime 在启动时执行全量同步，HTTP Provider 页面支持手动同步。HA Provider 已实现 `state_changed` 订阅契约，但当前 Runtime 尚未启动长期订阅或定时对账任务；页面实时查询仍直接读取 Provider。
+Runtime 启动时执行一次全量同步，随后持有每个 Provider 的长期事件订阅，并按配置间隔执行全量对账。订阅结束或异常时 Provider 标记为 degraded 并自动重连；事件会写入属性快照和设备事件，进程关闭时会关闭订阅、取消后台任务并释放 Provider/数据库资源。HTTP Provider 页面仍支持手动触发同步，页面实时查询直接读取 Provider。
+
+## 物模型生命周期
+
+Provider 同步生成的系统产品使用稳定、产品级能力标识；能力变化会生成新版本、归档旧 active 版本，并把设备和 Feature Binding 一并切换到新版本。每台设备持久化精确的 `model_version_id`，控制校验与 Web 控件都只使用该绑定版本，未知能力标识会拒绝执行。
+
+人工导入只接受标准 TSL JSON，并创建不可变 `draft`。草稿可校验、导出、发布或归档；同一产品最多一个 active 版本，只有显式发布后才会替换当前 active 并更新已有设备绑定。系统生成产品不允许通过人工导入覆盖身份。
 
 ## 控制与确认
 
@@ -109,7 +118,7 @@ uv run python -m iot_mcp --mode http
 | MCP、Machine Token、Admin Token | `autonomous` | 只创建 `pending_confirmation`，Provider 不执行 |
 | 自动低风险动作 | `autonomous` | 直接执行 |
 
-调用方不能在请求体中声明 `interaction_mode` 或提升来源。所有写入要求 `Idempotency-Key`，先持久化 `ControlOperation`；相同 key 返回原操作，不重复产生 Provider 副作用。审计存储不可写时返回 `audit_unavailable` 并阻断设备写。Provider 超时记录为 `unknown`，不会声称设备已完成。
+调用方不能在请求体中声明 `interaction_mode` 或提升来源。所有 HTTP 写入要求 `Idempotency-Key`，MCP 写工具要求调用方提供稳定的 `idempotency_key` 并在 MCP 命名空间内使用。请求先持久化 `ControlOperation`；同一 key 与相同语义指纹返回原操作，不重复产生 Provider 副作用，key 被不同设备、动作、来源或绑定复用时返回 `idempotency_conflict`。审计存储不可写时返回 `audit_unavailable` 并阻断设备写。Provider 控制请求超时记录为 `unknown`，不会声称设备已完成或提示安全重试。
 
 MCP 暴露查询物模型、设备、实时状态、操作和事件，以及 `set_device_properties`、`invoke_device_service`。MCP 不提供批准或拒绝工具；自动高风险确认只能通过已认证 Web 路由或签名消息回调。
 
@@ -172,16 +181,25 @@ curl --fail-with-body \
 
 ```bash
 cd modules/iot-mcp/backend
+uv sync --extra dev
 uv run pytest -q
 uv run ruff check src tests
 
 cd ../web
+npm ci
 npm run typecheck
 npm run test -- --run
 npm run build
 ```
 
-Backend E2E 会通过真实应用容器、临时 SQLite、Mock Provider、HTTP/MCP tool surface 和测试内生成的确定性 build-like Web artifact 验证控制链，因此干净工作树可以先独立运行 Backend 全量测试，不依赖 `web/dist`、Node 或 npm。`npm run build` 是生产 Web 构建产物的独立门禁。
+Backend E2E 通过真实应用容器、临时 SQLite、Mock Provider 和 HTTP/MCP surface 验证控制链；其中确定性的静态 Web fixture 只覆盖 SPA fallback，不代表浏览器覆盖。真实 React-to-FastAPI 验收使用 Playwright CLI：它从干净依赖安装开始构建 `web/dist`，启动 FastAPI，完成登录、低风险控制、人工高风险直控、自动高风险确认和 reload/Session 恢复。
+
+```bash
+export PWCLI="${CODEX_HOME:-$HOME/.codex}/skills/playwright/scripts/playwright_cli.sh"
+./scripts/browser_e2e.sh
+```
+
+脚本使用隔离浏览器 Session 与临时 SQLite，完成后清理运行时文件。需要 Node/npm、uv、curl，以及可用的 `playwright-cli` 或上述 wrapper。
 
 无常驻进程的 CLI 解析冒烟：
 

@@ -125,6 +125,27 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .model-import__form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .model-import__submit,
+  .model-actions {
+    width: 100%;
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .model-import__submit .button,
+  .model-actions .button {
+    width: 100%;
+  }
+
+  .model-detail-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
   .dashboard-grid__wide,
   .channel-flow {
     grid-column: auto;

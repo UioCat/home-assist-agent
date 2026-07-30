@@ -162,6 +162,61 @@
   align-items: start;
 }
 
+.model-import {
+  margin-bottom: 16px;
+  padding: 16px;
+}
+
+.model-import__form {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.7fr) minmax(280px, 1.3fr) auto;
+  align-items: end;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.model-import input[type="file"] {
+  padding: 8px 12px;
+}
+
+.model-import__submit {
+  display: flex;
+  min-width: 180px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.model-import__submit span {
+  max-width: 180px;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-feedback {
+  margin: -4px 0 16px;
+  border-left: 2px solid var(--online-green);
+  background: var(--panel-primary);
+}
+
+.inline-result--error {
+  color: #e7a0a0;
+}
+
+.model-detail-heading {
+  align-items: flex-start;
+}
+
+.model-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .list-pane,
 .detail-pane {
   min-height: 520px;

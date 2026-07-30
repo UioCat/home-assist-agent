@@ -68,11 +68,12 @@ async def test_mcp_high_risk_waits_for_signed_approval_then_executes_bound_actio
         pending = await _call_mcp(
             runtime,
             "set_device_properties",
-            {
-                "device_id": door["device_id"],
-                "values": {"LockState": "UNLOCK"},
-            },
-        )
+                {
+                    "device_id": door["device_id"],
+                    "values": {"LockState": "UNLOCK"},
+                    "idempotency_key": "autonomous-door-unlock",
+                },
+            )
         assert pending["status"] == "pending_confirmation"
         assert pending["confirmation_required"] is True
         assert provider.writes == []

@@ -136,3 +136,23 @@ def canonical_action_hash(
         payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     ).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def canonical_request_fingerprint(
+    device_id: str,
+    action: ControlAction,
+    *,
+    target: BoundTarget,
+    principal: TrustedPrincipal,
+) -> str:
+    """Bind an idempotency key to one immutable request and trusted surface."""
+    payload = {
+        "device_id": device_id,
+        "target": target.model_dump(mode="json"),
+        "action": action.model_dump(mode="json"),
+        "principal": principal.model_dump(mode="json"),
+    }
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()

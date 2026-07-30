@@ -54,6 +54,8 @@ async def test_mcp_registers_only_the_public_tool_contract(runtime) -> None:
         assert not {"interaction_mode", "initiator", "approve"} & set(
             tool.inputSchema["properties"]
         )
+        assert "idempotency_key" in tool.inputSchema["properties"]
+        assert "idempotency_key" in tool.inputSchema["required"]
 
 
 async def test_mcp_writes_are_autonomous_and_high_risk_requires_confirmation(runtime) -> None:
@@ -63,7 +65,11 @@ async def test_mcp_writes_are_autonomous_and_high_risk_requires_confirmation(run
     result = await _call(
         runtime,
         "set_device_properties",
-        {"device_id": door["device_id"], "values": {"LockState": "UNLOCK"}},
+        {
+            "device_id": door["device_id"],
+            "values": {"LockState": "UNLOCK"},
+            "idempotency_key": "unlock-front-door",
+        },
     )
 
     assert result["status"] == "pending_confirmation"
@@ -73,13 +79,52 @@ async def test_mcp_writes_are_autonomous_and_high_risk_requires_confirmation(run
     assert operation is not None
     assert operation.interaction_mode == "autonomous"
     assert operation.initiator == "mcp:mcp"
+    assert "idempotency_key" not in str(result["data"])
+
+
+async def test_mcp_caller_stable_idempotency_prevents_duplicate_effects_and_confirmations(
+    runtime,
+) -> None:
+    devices = await _call(runtime, "list_devices", {})
+    door = next(item for item in devices["data"] if item["display_name"] == "Front door")
+    light = next(item for item in devices["data"] if item["display_name"] == "Desk light")
+
+    high_arguments = {
+        "device_id": door["device_id"],
+        "values": {"LockState": "UNLOCK"},
+        "idempotency_key": "stable-high-risk",
+    }
+    first_high = await _call(runtime, "set_device_properties", high_arguments)
+    duplicate_high = await _call(runtime, "set_device_properties", high_arguments)
+    conflict = await _call(
+        runtime,
+        "set_device_properties",
+        {**high_arguments, "values": {"LockState": "LOCK"}},
+    )
+    low_arguments = {
+        "device_id": light["device_id"],
+        "values": {"Brightness": 61},
+        "idempotency_key": "stable-low-risk",
+    }
+    first_low = await _call(runtime, "set_device_properties", low_arguments)
+    duplicate_low = await _call(runtime, "set_device_properties", low_arguments)
+
+    assert first_high["operation_id"] == duplicate_high["operation_id"]
+    assert len(await runtime.container.confirmations.list_requests()) == 1
+    assert conflict["status"] == "failed"
+    assert conflict["error"]["code"] == "idempotency_conflict"
+    assert first_low["operation_id"] == duplicate_low["operation_id"]
 
 
 async def test_mcp_returns_stable_safe_input_errors(runtime) -> None:
     result = await _call(
         runtime,
         "set_device_properties",
-        {"device_id": "missing", "values": ["not-an-object"]},
+        {
+            "device_id": "missing",
+            "values": ["not-an-object"],
+            "idempotency_key": "invalid-values",
+        },
     )
 
     assert result["status"] == "failed"

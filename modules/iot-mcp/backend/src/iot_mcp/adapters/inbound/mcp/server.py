@@ -11,6 +11,7 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from iot_mcp.application.policy import ControlAction, SafeControlError, TrustedPrincipal
+from iot_mcp.application.safe_dto import operation_public_dto, redact_sensitive
 from iot_mcp.bootstrap.container import ApplicationContainer
 from iot_mcp.domain.enums import OperationStatus
 from iot_mcp.domain.models import utc_now
@@ -76,15 +77,18 @@ def create_mcp_server(
         return await _safe_call(operation)
 
     @server.tool(name="set_device_properties")
-    async def set_device_properties(device_id: Any, values: Any) -> dict[str, Any]:
+    async def set_device_properties(
+        device_id: Any, values: Any, idempotency_key: Any
+    ) -> dict[str, Any]:
         async def operation() -> dict[str, Any]:
             normalized_values = _required_object(values, "values")
             request_id = str(uuid4())
+            normalized_key = _required_string(idempotency_key, "idempotency_key")
             control_operation = await container.control.submit(
                 device_id=_required_string(device_id, "device_id"),
                 action=ControlAction.properties(normalized_values),
                 principal=TrustedPrincipal.mcp("mcp"),
-                idempotency_key=f"mcp:{request_id}",
+                idempotency_key=f"mcp:{normalized_key}",
             )
             return _operation_result(control_operation, request_id=request_id)
 
@@ -92,10 +96,14 @@ def create_mcp_server(
 
     @server.tool(name="invoke_device_service")
     async def invoke_device_service(
-        device_id: Any, identifier: Any, inputs: Any = None
+        device_id: Any,
+        identifier: Any,
+        idempotency_key: Any,
+        inputs: Any = None,
     ) -> dict[str, Any]:
         async def operation() -> dict[str, Any]:
             request_id = str(uuid4())
+            normalized_key = _required_string(idempotency_key, "idempotency_key")
             control_operation = await container.control.submit(
                 device_id=_required_string(device_id, "device_id"),
                 action=ControlAction.invoke_service(
@@ -103,7 +111,7 @@ def create_mcp_server(
                     {} if inputs is None else _required_object(inputs, "inputs"),
                 ),
                 principal=TrustedPrincipal.mcp("mcp"),
-                idempotency_key=f"mcp:{request_id}",
+                idempotency_key=f"mcp:{normalized_key}",
             )
             return _operation_result(control_operation, request_id=request_id)
 
@@ -187,7 +195,7 @@ def _required_limit(value: Any) -> int:
 
 def _operation_result(operation: Any, *, request_id: str | None = None) -> dict[str, Any]:
     confirmation_required = operation.status is OperationStatus.PENDING_CONFIRMATION
-    data: dict[str, Any] = {"operation": _json(operation)}
+    data: dict[str, Any] = {"operation": operation_public_dto(operation)}
     if confirmation_required:
         data["confirmation_required"] = True
         confirmation_id = (operation.result or {}).get("confirmation_id")
@@ -230,15 +238,8 @@ def _json(value: Any) -> Any:
         value = value.model_dump(mode="json")
     if isinstance(value, dict):
         return {
-            str(key): (
-                "[REDACTED]"
-                if any(
-                    word in str(key).lower()
-                    for word in ("token", "secret", "password", "authorization")
-                )
-                else _json(item)
-            )
-            for key, item in value.items()
+            str(key): _json(item)
+            for key, item in redact_sensitive(value).items()
         }
     if isinstance(value, (list, tuple)):
         return [_json(item) for item in value]

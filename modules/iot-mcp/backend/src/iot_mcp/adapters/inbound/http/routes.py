@@ -18,6 +18,7 @@ from iot_mcp.adapters.inbound.http.auth import (
 from iot_mcp.adapters.inbound.http.console_dto import (
     confirmation_console_dto,
     operation_console_dto,
+    operation_public_dto,
 )
 from iot_mcp.adapters.inbound.http.dependencies import (
     authenticated,
@@ -90,29 +91,29 @@ async def import_thing_model(
         json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     existing = await request.app.state.models.get_product_by_key(product_key)
-    product = await request.app.state.models.upsert_product(
-        ThingProduct(
-            product_id=existing.product_id if existing else None,
-            product_key=product_key,
-            name=payload.name,
-            source=payload.source,
-            capability_fingerprint=fingerprint,
+    if existing is not None and existing.source != "http":
+        raise SafeControlError(
+            "system_product_protected",
+            "system-generated product identity cannot be overwritten",
+            status_code=409,
         )
-        if existing
-        else ThingProduct(
-            product_key=product_key,
-            name=payload.name,
-            source=payload.source,
-            capability_fingerprint=fingerprint,
+    product = existing
+    if product is None:
+        product = await request.app.state.models.upsert_product(
+            ThingProduct(
+                product_key=product_key,
+                name=payload.name,
+                source="http",
+                capability_fingerprint=fingerprint,
+            )
         )
-    )
     versions = await request.app.state.models.list_model_versions(product.product_id)
     model = await request.app.state.models.add_model_version(
         ThingModelVersion(
             product_id=product.product_id,
             version=max((item.version for item in versions), default=0) + 1,
-            status=ModelStatus.ACTIVE,
-            tsl_json=payload.tsl,
+            status=ModelStatus.DRAFT,
+            tsl_json=canonical,
         )
     )
     return {
@@ -121,18 +122,31 @@ async def import_thing_model(
     }
 
 
-@router.get("/thing-models/{model_id}")
-async def get_thing_model(
+@router.get("/thing-models/{model_id}:export")
+async def export_thing_model(
     model_id: str,
     request: Request,
     _: TrustedPrincipal = Depends(authenticated),
-) -> dict[str, Any]:
+) -> Response:
     model = await request.app.state.models.get_model_version(model_id)
     if model is None:
         raise SafeControlError(
             "thing_model_not_found", "thing model was not found", status_code=404
         )
-    return model.model_dump(mode="json")
+    return Response(
+        content=json.dumps(
+            model.tsl_json,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        media_type="application/json",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="thing-model-v{model.version}.json"'
+            )
+        },
+    )
 
 
 @router.get("/thing-models/{product_id}/versions")
@@ -160,6 +174,68 @@ async def validate_thing_model(
     return {"valid": True, "model_version_id": model.model_version_id}
 
 
+@router.get("/thing-models/{model_id}")
+async def get_thing_model(
+    model_id: str,
+    request: Request,
+    _: TrustedPrincipal = Depends(authenticated),
+) -> dict[str, Any]:
+    model = await request.app.state.models.get_model_version(model_id)
+    if model is None:
+        raise SafeControlError(
+            "thing_model_not_found", "thing model was not found", status_code=404
+        )
+    return model.model_dump(mode="json")
+
+
+@router.post("/thing-models/{model_id}:publish")
+async def publish_thing_model(
+    model_id: str,
+    request: Request,
+    _: TrustedPrincipal = Depends(write_principal),
+) -> dict[str, Any]:
+    model = await request.app.state.models.get_model_version(model_id)
+    if model is None:
+        raise SafeControlError(
+            "thing_model_not_found", "thing model was not found", status_code=404
+        )
+    TslDocument.model_validate(model.tsl_json)
+    try:
+        published = await request.app.state.models.publish_model_version(
+            model_id
+        )
+    except ValueError as error:
+        raise SafeControlError(
+            "model_transition_invalid",
+            "only a draft model version can be published",
+            status_code=409,
+        ) from error
+    return published.model_dump(mode="json")
+
+
+@router.post("/thing-models/{model_id}:archive")
+async def archive_thing_model(
+    model_id: str,
+    request: Request,
+    _: TrustedPrincipal = Depends(write_principal),
+) -> dict[str, Any]:
+    try:
+        archived = await request.app.state.models.archive_model_version(
+            model_id
+        )
+    except KeyError as error:
+        raise SafeControlError(
+            "thing_model_not_found", "thing model was not found", status_code=404
+        ) from error
+    except ValueError as error:
+        raise SafeControlError(
+            "model_transition_invalid",
+            "only a draft model version can be archived",
+            status_code=409,
+        ) from error
+    return archived.model_dump(mode="json")
+
+
 @router.get("/devices")
 async def list_devices(
     request: Request, _: TrustedPrincipal = Depends(authenticated)
@@ -182,11 +258,21 @@ async def get_device(
         if device.product_id
         else []
     )
+    bound_model = (
+        await request.app.state.models.get_model_version(
+            device.model_version_id
+        )
+        if device.model_version_id
+        else None
+    )
     return {
         "device": device.model_dump(mode="json"),
         "bindings": [binding.model_dump(mode="json") for binding in bindings],
         "feature_bindings": [binding.model_dump(mode="json") for binding in feature_bindings],
         "model_versions": [model.model_dump(mode="json") for model in models],
+        "bound_model": (
+            bound_model.model_dump(mode="json") if bound_model else None
+        ),
     }
 
 
@@ -216,7 +302,7 @@ async def write_properties(
     )
     if operation.status is OperationStatus.PENDING_CONFIRMATION:
         response.status_code = 202
-    return operation.model_dump(mode="json")
+    return operation_public_dto(operation)
 
 
 @router.post("/devices/{device_id}/services/{identifier}:invoke")
@@ -236,7 +322,7 @@ async def invoke_service(
     )
     if operation.status is OperationStatus.PENDING_CONFIRMATION:
         response.status_code = 202
-    return operation.model_dump(mode="json")
+    return operation_public_dto(operation)
 
 
 @router.get("/operations")
@@ -258,7 +344,7 @@ async def get_operation(
     _: TrustedPrincipal = Depends(authenticated),
 ) -> dict[str, Any]:
     operation = await request.app.state.queries.get_operation(operation_id)
-    return operation.model_dump(mode="json")
+    return operation_public_dto(operation)
 
 
 @router.get("/confirmations")
@@ -293,7 +379,7 @@ async def approve_confirmation(
         actor=principal.actor_id,
         action_hash=payload.action_hash,
     )
-    return operation.model_dump(mode="json")
+    return operation_public_dto(operation)
 
 
 @router.post("/confirmations/{confirmation_id}:reject")
@@ -309,7 +395,7 @@ async def reject_confirmation(
         actor=principal.actor_id,
         action_hash=payload.action_hash,
     )
-    return operation.model_dump(mode="json")
+    return operation_public_dto(operation)
 
 
 @router.get("/device-events")
@@ -386,7 +472,7 @@ async def webhook_callback(
         actor=payload.actor,
         action_hash=payload.action_hash,
     )
-    return operation.model_dump(mode="json")
+    return operation_public_dto(operation)
 
 
 @router.post("/providers/{provider_id}:sync")

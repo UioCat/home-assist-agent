@@ -10,8 +10,10 @@ import type {
   OperationResult,
   ProviderStatus,
   SyncResult,
+  ThingModelImportResult,
   ThingModelVersion,
   ThingProduct,
+  TslDocument,
   SessionInfo,
 } from "./types";
 
@@ -90,10 +92,37 @@ export class HttpApiClient implements IoTApi {
     );
   }
 
+  importThingModel(name: string, tsl: TslDocument) {
+    return this.request<ThingModelImportResult>("/thing-models", {
+      method: "POST",
+      body: { name, tsl },
+    });
+  }
+
   validateThingModel(modelId: string) {
     return this.request<{ valid: boolean; model_version_id: string }>(
       `/thing-models/${encodeURIComponent(modelId)}:validate`,
       { method: "POST" },
+    );
+  }
+
+  publishThingModel(modelId: string) {
+    return this.request<ThingModelVersion>(
+      `/thing-models/${encodeURIComponent(modelId)}:publish`,
+      { method: "POST" },
+    );
+  }
+
+  archiveThingModel(modelId: string) {
+    return this.request<ThingModelVersion>(
+      `/thing-models/${encodeURIComponent(modelId)}:archive`,
+      { method: "POST" },
+    );
+  }
+
+  exportThingModel(modelId: string) {
+    return this.request<TslDocument>(
+      `/thing-models/${encodeURIComponent(modelId)}:export`,
     );
   }
 

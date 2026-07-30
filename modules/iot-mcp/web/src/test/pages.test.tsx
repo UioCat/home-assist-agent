@@ -193,4 +193,90 @@ describe("console states and safety interactions", () => {
     );
     expect(await screen.findByText(/通过标准 TSL 校验/)).toBeInTheDocument();
   });
+
+  it("imports a JSON document as a draft from the model workbench", async () => {
+    const api = new DemoApiClient();
+    const importModel = vi.spyOn(api, "importThingModel");
+    const user = userEvent.setup();
+    renderWithApi(<ThingModelsPage />, api);
+
+    await user.click(
+      await screen.findByRole("button", { name: "导入 TSL 草稿" }),
+    );
+    await user.type(screen.getByLabelText("产品名称"), "测试调光器");
+    await user.upload(
+      screen.getByLabelText("TSL JSON 文件"),
+      new File(
+        [
+          JSON.stringify({
+            schema: "https://iotx-tsl.example/schema.json",
+            profile: { productKey: "test-dimmer" },
+            properties: [],
+            services: [],
+            events: [],
+          }),
+        ],
+        "test-dimmer.json",
+        { type: "application/json" },
+      ),
+    );
+    await user.click(screen.getByRole("button", { name: "创建草稿" }));
+
+    await waitFor(() =>
+      expect(importModel).toHaveBeenCalledWith(
+        "测试调光器",
+        expect.objectContaining({
+          profile: { productKey: "test-dimmer" },
+        }),
+      ),
+    );
+    expect(await screen.findByText(/草稿已导入/)).toBeInTheDocument();
+  });
+
+  it("offers export, publish, and archive actions for a selected draft", async () => {
+    const api = new DemoApiClient();
+    const imported = await api.importThingModel("手工门锁", {
+      schema: "https://iotx-tsl.example/schema.json",
+      profile: { productKey: "manual-lock" },
+      properties: [],
+      services: [],
+      events: [],
+    });
+    const publish = vi
+      .spyOn(api, "publishThingModel")
+      .mockResolvedValue({ ...imported.model, status: "active" });
+    const archive = vi
+      .spyOn(api, "archiveThingModel")
+      .mockResolvedValue({ ...imported.model, status: "archived" });
+    const exportModel = vi
+      .spyOn(api, "exportThingModel")
+      .mockResolvedValue(imported.model.tsl_json);
+    const downloadClick = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => undefined);
+    const user = userEvent.setup();
+    renderWithApi(<ThingModelsPage />, api);
+
+    await user.click(
+      await screen.findByRole("button", { name: /手工门锁/ }),
+    );
+    await user.click(screen.getByRole("button", { name: "导出 JSON" }));
+    await waitFor(() =>
+      expect(exportModel).toHaveBeenCalledWith(
+        imported.model.model_version_id,
+      ),
+    );
+    await user.click(screen.getByRole("button", { name: "发布草稿" }));
+    await waitFor(() =>
+      expect(publish).toHaveBeenCalledWith(imported.model.model_version_id),
+    );
+
+    publish.mockClear();
+    await user.click(screen.getByRole("button", { name: /手工门锁/ }));
+    await user.click(screen.getByRole("button", { name: "归档草稿" }));
+    await waitFor(() =>
+      expect(archive).toHaveBeenCalledWith(imported.model.model_version_id),
+    );
+    downloadClick.mockRestore();
+  });
 });

@@ -9,13 +9,19 @@ from typing import Any
 import httpx
 import websockets
 
-RegistryLoader = Callable[[], Awaitable[dict[str, str | None]]]
+RegistryLoader = Callable[[], Awaitable[Any]]
 
 
 class HomeAssistantError(RuntimeError):
     def __init__(self, category: str, message: str) -> None:
         super().__init__(message)
         self.category = category
+
+
+class HomeAssistantTimeout(TimeoutError):
+    """A request may have reached HA, so the operation outcome is unknown."""
+
+    category = "provider_timeout"
 
 
 class HomeAssistantClient:
@@ -34,6 +40,7 @@ class HomeAssistantClient:
         self._headers = {"Authorization": f"Bearer {token}"}
         self._timeout_seconds = timeout_seconds
         self._registry_loader = registry_loader
+        self._loaded_registry: Any = None
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -64,16 +71,77 @@ class HomeAssistantClient:
 
     async def get_entity_device_ids(self) -> dict[str, str | None]:
         """Read the HA entity registry so physical devices do not become virtual entities."""
-        if self._registry_loader is not None:
-            return await self._registry_loader()
-        entries = await self._websocket_command("config/entity_registry/list")
-        if not isinstance(entries, list):
-            raise HomeAssistantError("provider_error", "HA entity registry must be an array")
+        entries = await self.get_entity_registry()
         return {
             entry["entity_id"]: entry.get("device_id")
             for entry in entries
-            if isinstance(entry, dict) and isinstance(entry.get("entity_id"), str)
+            if isinstance(entry.get("entity_id"), str)
         }
+
+    async def get_entity_registry(self) -> list[dict[str, Any]]:
+        loaded = await self._load_injected_registry()
+        if loaded is not None:
+            if isinstance(loaded, list):
+                entries = loaded
+            elif isinstance(loaded, dict) and isinstance(loaded.get("entities"), list):
+                entries = loaded["entities"]
+            elif isinstance(loaded, dict):
+                entries = [
+                    {
+                        "entity_id": entity_id,
+                        "device_id": device_id,
+                        "id": entity_id,
+                    }
+                    for entity_id, device_id in loaded.items()
+                ]
+            else:
+                entries = []
+        else:
+            entries = await self._websocket_command("config/entity_registry/list")
+        if not isinstance(entries, list):
+            raise HomeAssistantError("provider_error", "HA entity registry must be an array")
+        return [entry for entry in entries if isinstance(entry, dict)]
+
+    async def get_device_registry(self) -> list[dict[str, Any]]:
+        loaded = await self._load_injected_registry()
+        if loaded is not None:
+            entries = loaded.get("devices", []) if isinstance(loaded, dict) else []
+        else:
+            entries = await self._websocket_command("config/device_registry/list")
+        if not isinstance(entries, list):
+            raise HomeAssistantError("provider_error", "HA device registry must be an array")
+        return [entry for entry in entries if isinstance(entry, dict)]
+
+    async def get_area_registry(self) -> list[dict[str, Any]]:
+        loaded = await self._load_injected_registry()
+        if loaded is not None:
+            entries = loaded.get("areas", []) if isinstance(loaded, dict) else []
+        else:
+            entries = await self._websocket_command("config/area_registry/list")
+        if not isinstance(entries, list):
+            raise HomeAssistantError("provider_error", "HA area registry must be an array")
+        return [entry for entry in entries if isinstance(entry, dict)]
+
+    async def _load_injected_registry(self) -> Any:
+        if self._registry_loader is None:
+            return None
+        if self._loaded_registry is None:
+            self._loaded_registry = await self._registry_loader()
+        return self._loaded_registry
+
+    async def get_config(self) -> dict[str, Any]:
+        response = await self._request("GET", "/api/config")
+        body = self._decode_json(response)
+        if not isinstance(body, dict):
+            raise HomeAssistantError("provider_error", "HA config response must be an object")
+        return body
+
+    async def get_services(self) -> list[dict[str, Any]]:
+        response = await self._request("GET", "/api/services")
+        body = self._decode_json(response)
+        if not isinstance(body, list):
+            raise HomeAssistantError("provider_error", "HA services response must be an array")
+        return [item for item in body if isinstance(item, dict)]
 
     async def get_states(self) -> list[dict[str, Any]]:
         response = await self._request("GET", "/api/states")
@@ -90,7 +158,12 @@ class HomeAssistantClient:
         return body
 
     async def call_service(self, domain: str, service: str, data: dict[str, Any]) -> Any:
-        response = await self._request("POST", f"/api/services/{domain}/{service}", json=data)
+        response = await self._request(
+            "POST",
+            f"/api/services/{domain}/{service}",
+            json=data,
+            indeterminate_timeout=True,
+        )
         return self._decode_json(response)
 
     def _decode_json(self, response: httpx.Response) -> Any:
@@ -129,6 +202,7 @@ class HomeAssistantClient:
         return result.get("result")
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        indeterminate_timeout = bool(kwargs.pop("indeterminate_timeout", False))
         try:
             response = await self._client.request(
                 method,
@@ -137,7 +211,11 @@ class HomeAssistantClient:
                 timeout=self._timeout_seconds,
                 **kwargs,
             )
-        except (httpx.TimeoutException, httpx.TransportError) as error:
+        except httpx.TimeoutException as error:
+            if indeterminate_timeout:
+                raise HomeAssistantTimeout(str(error)) from error
+            raise HomeAssistantError("provider_offline", str(error)) from error
+        except httpx.TransportError as error:
             raise HomeAssistantError("provider_offline", str(error)) from error
         if response.status_code in {401, 403}:
             raise HomeAssistantError("provider_auth_error", response.text)
