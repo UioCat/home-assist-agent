@@ -1,0 +1,138 @@
+.provider-console {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.provider-console__row {
+  display: grid;
+  min-height: 92px;
+  grid-template-columns: minmax(200px, 0.8fr) minmax(120px, 0.4fr) minmax(220px, 1fr) auto;
+  align-items: center;
+  gap: 20px;
+  padding: 16px;
+}
+
+.provider-console__identity {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.provider-console__identity > div,
+.provider-console__status,
+.provider-console__detail {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.provider-console__identity span,
+.provider-console__status > span,
+.provider-console__detail > span {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.provider-console__detail strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.provider-glyph {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border: 1px solid var(--border-structure);
+  border-radius: 50%;
+  color: var(--electric-blue-strong) !important;
+  font: 500 13px "IBM Plex Mono", monospace;
+}
+
+.diagnostic-note {
+  padding: 16px;
+}
+
+.diagnostic-note .definition-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 12px;
+}
+
+.channel-workbench {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.65fr) minmax(320px, 1fr);
+  gap: 16px;
+}
+
+.channel-summary {
+  display: flex;
+  min-height: 220px;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 20px;
+}
+
+.channel-summary h2 {
+  margin-top: 6px;
+  font-size: 20px;
+}
+
+.channel-summary p {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.channel-contract {
+  padding-bottom: 8px;
+}
+
+.channel-contract .context-list {
+  padding: 0 16px;
+}
+
+.channel-flow {
+  grid-column: 1 / -1;
+  padding: 16px;
+}
+
+.channel-deliveries {
+  grid-column: 1 / -1;
+}
+
+.channel-flow ol {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 16px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.channel-flow li {
+  display: flex;
+  min-height: 72px;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border-left: 1px solid var(--border-structure);
+}
+
+.channel-flow li > span {
+  color: var(--electric-blue-strong);
+  font: 500 12px "IBM Plex Mono", monospace;
+}
+
+.channel-flow li > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.channel-flow small {
+  color: var(--text-muted);
+}

@@ -1,0 +1,400 @@
+"""Persist-first device-control orchestration."""
+
+from __future__ import annotations
+
+from datetime import timedelta
+from typing import TYPE_CHECKING
+
+from pydantic import ValidationError
+
+from iot_mcp.adapters.outbound.persistence.repositories import (
+    ConfirmationRepository,
+    DeviceRepository,
+    IdempotencyConflictError,
+    OperationRepository,
+    ThingModelRepository,
+)
+from iot_mcp.application.policy import (
+    BoundTarget,
+    ControlAction,
+    ControlPolicy,
+    SafeControlError,
+    TrustedPrincipal,
+    canonical_action_hash,
+    canonical_request_fingerprint,
+)
+from iot_mcp.application.safe_dto import (
+    operation_public_dto,
+    redact_sensitive,
+    safe_action_dto,
+)
+from iot_mcp.domain.enums import (
+    ConfirmationDecision,
+    ModelStatus,
+    OperationStatus,
+    RiskLevel,
+)
+from iot_mcp.domain.models import (
+    ConfirmationRequest,
+    ControlOperation,
+    DeviceInstance,
+    utc_now,
+)
+from iot_mcp.domain.tsl import TslDocument, TslValidationError
+from iot_mcp.ports.device_provider import DeviceProvider, ProviderResult
+from iot_mcp.ports.message_channel import MessageChannel
+
+if TYPE_CHECKING:
+    from iot_mcp.application.confirmation_service import ConfirmationService
+
+
+class ControlService:
+    def __init__(
+        self,
+        *,
+        devices: DeviceRepository,
+        operations: OperationRepository,
+        confirmations: ConfirmationRepository,
+        providers: dict[str, DeviceProvider],
+        confirmation_actor: str,
+        models: ThingModelRepository | None = None,
+        message_channel: MessageChannel | None = None,
+        confirmation_ttl_seconds: int = 300,
+        policy: ControlPolicy | None = None,
+    ) -> None:
+        self._devices = devices
+        self._operations = operations
+        self._confirmations = confirmations
+        self._providers = providers
+        self._confirmation_actor = confirmation_actor
+        self._models = models
+        self._message_channel = message_channel
+        self._confirmation_ttl_seconds = confirmation_ttl_seconds
+        self._policy = policy or ControlPolicy()
+        self._confirmation_service: ConfirmationService | None = None
+
+    def bind_confirmation_service(self, service: ConfirmationService) -> None:
+        self._confirmation_service = service
+
+    async def submit(
+        self,
+        *,
+        device_id: str,
+        action: ControlAction,
+        principal: TrustedPrincipal,
+        idempotency_key: str,
+    ) -> ControlOperation:
+        if not idempotency_key:
+            raise SafeControlError("idempotency_key_required", "Idempotency-Key is required")
+        device = await self._devices.get_device(device_id)
+        if device is None:
+            raise SafeControlError("target_not_found", "device was not found", status_code=404)
+        binding = await self._devices.get_primary_binding(device_id, device.provider_id)
+        if binding is None:
+            raise SafeControlError(
+                "binding_not_found", "device binding was not found", status_code=409
+            )
+        await self._validate_action(device, action)
+        risk = await self._resolve_risk(device_id, device.risk_level, action)
+        target = BoundTarget(
+            binding_id=binding.binding_id,
+            provider_id=device.provider_id,
+            provider_type=binding.provider_type,
+            external_device_ref=binding.external_device_ref,
+            binding_revision=binding.binding_revision,
+        )
+
+        proposed = ControlOperation(
+            device_id=device_id,
+            initiator=f"{principal.source}:{principal.actor_id}",
+            interaction_mode=principal.mode,
+            action=action.model_dump(mode="json"),
+            **target.model_dump(),
+            idempotency_key=idempotency_key,
+            request_fingerprint=canonical_request_fingerprint(
+                device_id,
+                action,
+                target=target,
+                principal=principal,
+            ),
+        )
+        try:
+            operation = await self._operations.create_operation(proposed)
+        except IdempotencyConflictError as error:
+            raise SafeControlError(
+                "idempotency_conflict",
+                "Idempotency-Key belongs to a different request",
+                status_code=409,
+            ) from error
+        except Exception as error:
+            raise SafeControlError(
+                "audit_unavailable",
+                "control audit storage is unavailable",
+                status_code=503,
+                retryable=True,
+            ) from error
+        if operation.operation_id != proposed.operation_id:
+            return operation
+
+        if self._policy.requires_confirmation(principal=principal, risk=risk):
+            action_hash = canonical_action_hash(
+                device_id, action, target=target
+            )
+            try:
+                confirmation = await self._confirmations.create_request(
+                    ConfirmationRequest(
+                        operation_id=operation.operation_id,
+                        action_hash=action_hash,
+                        authorized_actor=self._confirmation_actor,
+                        **target.model_dump(),
+                        expires_at=utc_now()
+                        + timedelta(seconds=self._confirmation_ttl_seconds),
+                    )
+                )
+                operation = await self._operations.update_operation(
+                    operation.operation_id,
+                    status=OperationStatus.PENDING_CONFIRMATION,
+                    result={"confirmation_id": confirmation.confirmation_id},
+                )
+            except Exception as error:
+                raise SafeControlError(
+                    "audit_unavailable",
+                    "confirmation audit storage is unavailable",
+                    status_code=503,
+                    retryable=True,
+                ) from error
+            await self._notify_confirmation_safely(confirmation, action)
+            return operation
+        return await self._execute(operation)
+
+    async def execute_approved(self, operation_id: str) -> ControlOperation:
+        operation = await self._operations.get_operation(operation_id)
+        if operation is None:
+            raise SafeControlError(
+                "operation_not_found", "operation was not found", status_code=404
+            )
+        target = _operation_target(operation)
+        confirmation = await self._confirmations.get_by_operation(operation_id)
+        if (
+            target is None
+            or confirmation is None
+            or confirmation.decision is not ConfirmationDecision.APPROVED
+            or any(
+                getattr(confirmation, key) != value
+                for key, value in target.model_dump().items()
+            )
+        ):
+            return await self._operations.update_operation(
+                operation.operation_id,
+                status=OperationStatus.REJECTED,
+                result={"code": "approval_binding_invalid", "retryable": False},
+            )
+        operation = await self._operations.update_operation(
+            operation.operation_id, status=OperationStatus.APPROVED
+        )
+        return await self._execute(operation)
+
+    async def _execute(self, operation: ControlOperation) -> ControlOperation:
+        target = _operation_target(operation)
+        if target is None:
+            return await self._operations.update_operation(
+                operation.operation_id,
+                status=OperationStatus.REJECTED,
+                result={"code": "bound_target_missing", "retryable": False},
+            )
+        provider = self._providers.get(target.provider_id)
+        if provider is None or provider.provider_type != target.provider_type:
+            return await self._operations.update_operation(
+                operation.operation_id,
+                status=OperationStatus.FAILED,
+                result={"code": "provider_binding_mismatch", "retryable": False},
+            )
+        action = ControlAction.model_validate(operation.action)
+        operation = await self._operations.update_operation(
+            operation.operation_id,
+            status=OperationStatus.EXECUTING,
+            provider_request=self._provider_request(action),
+        )
+        try:
+            if action.kind == "properties":
+                current = await provider.read_state(
+                    target.external_device_ref, list(action.values)
+                )
+                if all(current.values.get(key) == value for key, value in action.values.items()):
+                    return await self._operations.update_operation(
+                        operation.operation_id,
+                        status=OperationStatus.NO_OP,
+                        result={"state": current.values},
+                    )
+                result = await provider.write_properties(
+                    target.external_device_ref, action.values
+                )
+            else:
+                result = await provider.invoke_service(
+                    target.external_device_ref, action.service or "", action.inputs
+                )
+        except TimeoutError:
+            return await self._operations.update_operation(
+                operation.operation_id,
+                status=OperationStatus.UNKNOWN,
+                result={"code": "provider_timeout", "retryable": False},
+            )
+        except Exception:
+            return await self._operations.update_operation(
+                operation.operation_id,
+                status=OperationStatus.UNKNOWN,
+                result={"code": "provider_error", "retryable": True},
+            )
+        completed = await self._record_provider_result(operation, action, result)
+        await self._notify_result_safely(completed)
+        return completed
+
+    async def _record_provider_result(
+        self,
+        operation: ControlOperation,
+        action: ControlAction,
+        provider_result: ProviderResult,
+    ) -> ControlOperation:
+        if provider_result.error_code == "provider_timeout":
+            return await self._operations.update_operation(
+                operation.operation_id,
+                status=OperationStatus.UNKNOWN,
+                provider_result={
+                    "ok": False,
+                    "error_code": "provider_timeout",
+                    "data": {},
+                },
+                result={"code": "provider_timeout", "retryable": False},
+            )
+        status = self._result_status(action, provider_result)
+        result = (
+            {"data": redact_sensitive(provider_result.data)}
+            if provider_result.ok
+            else {
+                "code": provider_result.error_code or "provider_failed",
+                "message": "provider rejected the operation",
+                "retryable": provider_result.error_code == "provider_offline",
+            }
+        )
+        return await self._operations.update_operation(
+            operation.operation_id,
+            status=status,
+            provider_result={
+                "ok": provider_result.ok,
+                "error_code": provider_result.error_code,
+                "data": redact_sensitive(provider_result.data),
+            },
+            result=result,
+        )
+
+    @staticmethod
+    def _result_status(
+        action: ControlAction, provider_result: ProviderResult
+    ) -> OperationStatus:
+        if not provider_result.ok:
+            return OperationStatus.FAILED
+        after = provider_result.data.get("after")
+        if (
+            action.kind == "properties"
+            and isinstance(after, dict)
+            and all(after.get(key) == value for key, value in action.values.items())
+        ):
+            return OperationStatus.SUCCEEDED
+        return OperationStatus.ACCEPTED
+
+    async def _validate_action(
+        self, device: DeviceInstance, action: ControlAction
+    ) -> None:
+        if action.kind == "properties" and not action.values:
+            raise SafeControlError(
+                "invalid_action", "property values must not be empty", status_code=422
+            )
+        if action.kind == "service" and not action.service:
+            raise SafeControlError("invalid_action", "service is required", status_code=422)
+        if self._models is None or device.product_id is None:
+            return
+        if device.model_version_id is None:
+            raise SafeControlError(
+                "model_binding_missing",
+                "device has no bound thing model version",
+                status_code=409,
+            )
+        active = await self._models.get_model_version(device.model_version_id)
+        if active is None or active.product_id != device.product_id:
+            raise SafeControlError(
+                "model_binding_invalid",
+                "device thing model binding is invalid",
+                status_code=409,
+            )
+        if active.status is not ModelStatus.ACTIVE:
+            raise SafeControlError(
+                "model_not_active",
+                "device thing model version is not active",
+                status_code=409,
+            )
+        try:
+            document = TslDocument.model_validate(active.tsl_json)
+            if action.kind == "properties":
+                for identifier, value in action.values.items():
+                    document.validate_property_write(identifier, value)
+            else:
+                document.validate_service_inputs(action.service or "", action.inputs)
+        except (ValidationError, TslValidationError) as error:
+            raise SafeControlError(
+                "invalid_action", "action does not match the active thing model", status_code=422
+            ) from error
+
+    async def _resolve_risk(
+        self, device_id: str, default: RiskLevel, action: ControlAction
+    ) -> RiskLevel:
+        identifiers = set(action.values) if action.kind == "properties" else {action.service}
+        levels = [default]
+        for binding in await self._devices.list_feature_bindings(device_id):
+            if binding.identifier in identifiers and binding.risk_level is not None:
+                levels.append(binding.risk_level)
+        rank = {RiskLevel.LOW: 0, RiskLevel.MEDIUM: 1, RiskLevel.HIGH: 2}
+        return max(levels, key=rank.__getitem__)
+
+    @staticmethod
+    def _provider_request(action: ControlAction) -> dict[str, object]:
+        return safe_action_dto(action)
+
+    async def _notify_confirmation_safely(
+        self, confirmation: ConfirmationRequest, action: ControlAction
+    ) -> None:
+        if self._message_channel is None:
+            return
+        try:
+            await self._message_channel.send_confirmation(
+                {
+                    "confirmation_id": confirmation.confirmation_id,
+                    "action_hash": confirmation.action_hash,
+                    "expires_at": confirmation.expires_at.isoformat(),
+                    "action": safe_action_dto(action),
+                }
+            )
+        except Exception:
+            pass
+
+    async def _notify_result_safely(self, operation: ControlOperation) -> None:
+        if self._message_channel is None:
+            return
+        try:
+            await self._message_channel.send_result(
+                operation_public_dto(operation)
+            )
+        except Exception:
+            pass
+
+
+def _operation_target(operation: ControlOperation) -> BoundTarget | None:
+    values = {
+        "binding_id": operation.binding_id,
+        "provider_id": operation.provider_id,
+        "provider_type": operation.provider_type,
+        "external_device_ref": operation.external_device_ref,
+        "binding_revision": operation.binding_revision,
+    }
+    if any(value is None for value in values.values()):
+        return None
+    return BoundTarget.model_validate(values)

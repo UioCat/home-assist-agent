@@ -1,0 +1,85 @@
+# Deployment-value reference only. The current runtime does not parse YAML or
+# accept --config. Apply these values through the exact environment variables
+# shown below (or translate them in your deployment system).
+
+server:
+  host:
+    env: IOT_MCP_SERVER_HOST
+    value: 127.0.0.1
+  port:
+    env: IOT_MCP_SERVER_PORT
+    value: 8090
+  web_dist_path:
+    env: IOT_MCP_WEB_DIST_PATH
+    value: ../web/dist
+
+mcp:
+  host:
+    env: IOT_MCP_MCP_HOST
+    value: 127.0.0.1
+  port:
+    env: IOT_MCP_MCP_PORT
+    value: 8091
+
+storage:
+  database_url:
+    env: IOT_MCP_DATABASE_URL
+    value: sqlite+aiosqlite:///./iot_mcp.db
+
+runtime:
+  reconcile_interval_seconds:
+    env: IOT_MCP_RECONCILE_INTERVAL_SECONDS
+    value: 600
+  provider_reconnect_delay_seconds:
+    env: IOT_MCP_PROVIDER_RECONNECT_DELAY_SECONDS
+    value: 1
+
+auth:
+  # Replace every placeholder and inject it from a secret manager.
+  admin_token:
+    env: IOT_MCP_ADMIN_TOKEN
+    value: replace-with-admin-token
+  machine_tokens:
+    env: IOT_MCP_MACHINE_TOKENS
+    value: '{"replace-with-machine-token":"automation-agent"}'
+  session_signing_secret:
+    env: IOT_MCP_SESSION_SIGNING_SECRET
+    value: replace-with-random-session-signing-secret
+  secure_cookies:
+    env: IOT_MCP_SECURE_COOKIES
+    value: true
+  allowed_confirmation_actors:
+    env: IOT_MCP_ALLOWED_CONFIRMATION_ACTORS
+    value: '["owner"]'
+
+providers:
+  mock:
+    enabled:
+      env: IOT_MCP_MOCK_PROVIDER_ENABLED
+      value: true
+  home_assistant:
+    # HA stays disabled until both URL and token are set.
+    url:
+      env: IOT_MCP_HOME_ASSISTANT_URL
+      value: null
+    token:
+      env: IOT_MCP_HOME_ASSISTANT_TOKEN
+      value: null
+    timeout_seconds:
+      env: IOT_MCP_HOME_ASSISTANT_TIMEOUT_SECONDS
+      value: 10
+
+message_channels:
+  signed_webhook:
+    secret:
+      env: IOT_MCP_WEBHOOK_SECRET
+      value: replace-with-random-webhook-secret
+    send_url:
+      env: IOT_MCP_WEBHOOK_SEND_URL
+      value: null
+    timestamp_tolerance_seconds:
+      env: IOT_MCP_WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS
+      value: 300
+    confirmation_ttl_seconds:
+      env: IOT_MCP_CONFIRMATION_TTL_SECONDS
+      value: 300
