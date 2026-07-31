@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import delete, select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -626,20 +627,30 @@ class WebhookNonceRepository:
         now: datetime,
     ) -> bool:
         async with self._sessions() as session:
-            await session.execute(
-                delete(WebhookNonceTable).where(WebhookNonceTable.expires_at < now)
+            insert_statement = sqlite_insert(WebhookNonceTable).values(
+                nonce=nonce,
+                signed_timestamp=signed_timestamp,
+                expires_at=expires_at,
+                created_at=now,
             )
-            session.add(
-                WebhookNonceTable(
-                    nonce=nonce,
-                    signed_timestamp=signed_timestamp,
-                    expires_at=expires_at,
-                    created_at=now,
+            result = await session.execute(
+                insert_statement.on_conflict_do_update(
+                    index_elements=[WebhookNonceTable.nonce],
+                    set_={
+                        "signed_timestamp": insert_statement.excluded.signed_timestamp,
+                        "expires_at": insert_statement.excluded.expires_at,
+                        "created_at": insert_statement.excluded.created_at,
+                    },
+                    where=WebhookNonceTable.expires_at < now,
                 )
             )
-            try:
-                await session.commit()
-            except IntegrityError:
-                await session.rollback()
-                return False
-            return True
+            consumed = result.rowcount == 1
+            if consumed:
+                await session.execute(
+                    delete(WebhookNonceTable).where(
+                        WebhookNonceTable.nonce != nonce,
+                        WebhookNonceTable.expires_at < now,
+                    )
+                )
+            await session.commit()
+            return consumed
