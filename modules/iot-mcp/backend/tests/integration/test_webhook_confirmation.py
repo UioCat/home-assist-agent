@@ -40,6 +40,7 @@ def _signed_headers(secret: str, body: bytes, *, nonce: str, timestamp: int | No
 async def test_signed_webhook_approves_bound_action_once_and_rejects_replay(tmp_path) -> None:
     secret = "webhook-secret"
     settings = Settings(
+        auth_enabled=True,
         database_url=f"sqlite+aiosqlite:///{tmp_path / 'webhook.db'}",
         admin_token="admin",
         session_signing_secret="session-secret",
@@ -106,6 +107,7 @@ async def test_signed_webhook_approves_bound_action_once_and_rejects_replay(tmp_
 async def test_webhook_rejects_stale_timestamp_bad_actor_and_action_substitution(tmp_path) -> None:
     secret = "webhook-secret"
     settings = Settings(
+        auth_enabled=True,
         database_url=f"sqlite+aiosqlite:///{tmp_path / 'bad-webhook.db'}",
         admin_token="admin",
         session_signing_secret="session-secret",

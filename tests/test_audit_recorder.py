@@ -16,6 +16,7 @@ async def test_sqlite_audit_recorder_appends_ordered_events_by_message_id(
 
     await recorder.record(
         message_id="message-1",
+        conversation_id="conversation-1",
         event_type="user.request",
         service="web",
         payload={"command": "打开客厅灯"},
@@ -57,6 +58,41 @@ async def test_sqlite_audit_recorder_appends_ordered_events_by_message_id(
     assert messages[1].event_count == 2
     assert messages[1].status == "success"
     assert messages[1].correlation_id == "conversation-1"
+    assert messages[1].conversation_id == "conversation-1"
+
+
+@pytest.mark.asyncio
+async def test_audit_events_can_be_queried_in_conversation_order(
+    tmp_path: Path,
+) -> None:
+    recorder = SQLiteAuditRecorder(tmp_path / "audit.db")
+    await recorder.record(
+        message_id="message-1",
+        conversation_id="conversation-1",
+        event_type="user.request",
+        service="console",
+        payload={"command": "打开灯"},
+    )
+    await recorder.record(
+        message_id="message-2",
+        conversation_id="conversation-1",
+        event_type="user.response",
+        service="voice",
+        payload={"message": "已打开"},
+    )
+    await recorder.record(
+        message_id="message-other",
+        conversation_id="conversation-2",
+        event_type="user.request",
+        service="console",
+        payload={"command": "你好"},
+    )
+
+    events = await recorder.list_conversation_events("conversation-1")
+
+    assert [event.message_id for event in events] == ["message-1", "message-2"]
+    assert all(event.request_id == event.message_id for event in events)
+    assert {event.conversation_id for event in events} == {"conversation-1"}
 
 
 @pytest.mark.asyncio

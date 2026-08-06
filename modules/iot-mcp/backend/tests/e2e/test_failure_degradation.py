@@ -15,19 +15,36 @@ from iot_mcp.bootstrap.runtime import build_runtime
 from iot_mcp.config.settings import Settings
 
 
+class RecordingAudit:
+    async def record(self, **_: object) -> None:
+        return None
+
+
 class OfflineMockProvider(MockDeviceProvider):
     def __init__(self) -> None:
         super().__init__()
         self.write_attempts = 0
 
-    async def read_state(self, device_ref: str, selectors: list[str] | None = None):
+    async def read_state(
+        self,
+        device_ref: str,
+        selectors: list[str] | None = None,
+        *,
+        message_id: str | None = None,
+    ):
         raise ConnectionError("provider is offline")
 
     async def write_properties(
-        self, device_ref: str, values: dict[str, Any]
+        self,
+        device_ref: str,
+        values: dict[str, Any],
+        *,
+        message_id: str | None = None,
     ):
         self.write_attempts += 1
-        return await super().write_properties(device_ref, values)
+        return await super().write_properties(
+            device_ref, values, message_id=message_id
+        )
 
 
 class TimeoutMockProvider(MockDeviceProvider):
@@ -36,7 +53,11 @@ class TimeoutMockProvider(MockDeviceProvider):
         self.write_attempts = 0
 
     async def write_properties(
-        self, device_ref: str, values: dict[str, Any]
+        self,
+        device_ref: str,
+        values: dict[str, Any],
+        *,
+        message_id: str | None = None,
     ):
         self.write_attempts += 1
         raise TimeoutError("provider timed out")
@@ -44,6 +65,7 @@ class TimeoutMockProvider(MockDeviceProvider):
 
 def _settings(tmp_path: Path, name: str) -> Settings:
     return Settings(
+        auth_enabled=True,
         database_url=f"sqlite+aiosqlite:///{tmp_path / name}",
         machine_tokens={"example-machine-token": "e2e-agent"},
         session_signing_secret="example-session-secret",
@@ -120,7 +142,7 @@ async def test_audit_failure_is_fail_closed_before_provider_write(
 ) -> None:
     provider = TimeoutMockProvider()
     runtime = build_runtime(
-        _settings(tmp_path, "audit.db"),
+        _settings(tmp_path, "audit.db").model_copy(update={"auth_enabled": False}),
         providers={"mock": provider},
     )
     await runtime.startup()
@@ -143,7 +165,6 @@ async def test_audit_failure_is_fail_closed_before_provider_write(
             response = await client.post(
                 f"/api/v1/devices/{light_id}/properties:write",
                 headers={
-                    "Authorization": "Bearer example-machine-token",
                     "Idempotency-Key": "e2e-audit-failure",
                 },
                 json={"values": {"Brightness": 65}},
@@ -171,6 +192,7 @@ async def test_home_assistant_initial_sync_degrades_without_fake_online_devices(
         "placeholder-token",
         client=httpx.AsyncClient(transport=httpx.MockTransport(offline)),
         registry_loader=empty_registry,
+        audit=RecordingAudit(),
     )
     runtime = build_runtime(
         _settings(tmp_path, "ha-offline.db"),

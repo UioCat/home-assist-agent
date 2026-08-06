@@ -214,8 +214,13 @@ def properties_from_state(state: dict[str, Any]) -> dict[str, Any]:
     raw_state = state.get("state")
     if domain in {"light", "switch"}:
         values: dict[str, Any] = {"PowerSwitch": raw_state == "on"}
-        if domain == "light" and "brightness" in attributes:
-            values["Brightness"] = ha_brightness_to_percent(attributes["brightness"])
+        brightness = attributes.get("brightness")
+        if (
+            domain == "light"
+            and isinstance(brightness, int | float)
+            and not isinstance(brightness, bool)
+        ):
+            values["Brightness"] = ha_brightness_to_percent(brightness)
         return values
     if domain == "climate":
         values = {
@@ -229,6 +234,15 @@ def properties_from_state(state: dict[str, Any]) -> dict[str, Any]:
     if domain == "lock":
         return {"LockState": "LOCK" if raw_state == "locked" else "UNLOCK"}
     return {"State": raw_state}
+
+
+def availability_from_state(state: dict[str, Any]) -> str:
+    raw_state = state.get("state")
+    if raw_state == "unavailable":
+        return "offline"
+    if raw_state in {None, "unknown"}:
+        return "unknown"
+    return "online"
 
 
 def map_ha_state(
@@ -267,6 +281,7 @@ def map_ha_state(
         state=DeviceState(
             device_ref=stable_ref,
             values=properties_from_state(state),
+            availability=availability_from_state(state),
         ),
         feature_bindings=bindings,
         metadata={

@@ -237,6 +237,7 @@ class ResolutionDetails(BaseModel):
 class CommandResponse(BaseModel):
     message_id: str
     request_id: str
+    conversation_id: str | None = None
     category: CommandCategory
     route: Literal["home_assistant_mcp", "codex"]
     status: CommandStatus

@@ -1,11 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
+import { AgentApiClient, type AgentApi } from "./api/agent";
+import { AgentApiProvider } from "./api/agentContext";
+import { ApiError } from "./api/client";
 import { ApiProvider } from "./api/context";
 import { DemoApiClient } from "./api/demo";
 import { HttpApiClient } from "./api/client";
 import type { IoTApi } from "./api/types";
 import { AppShell } from "./components/AppShell";
+import { AuditCenterPage } from "./pages/AuditCenterPage";
+import { CommandCenterPage } from "./pages/CommandCenterPage";
 import { DeviceDetailPage } from "./pages/DeviceDetailPage";
 import { DevicesPage } from "./pages/DevicesPage";
 import { EventsPage } from "./pages/EventsPage";
@@ -15,30 +20,38 @@ import { OverviewPage } from "./pages/OverviewPage";
 import { ProvidersPage } from "./pages/ProvidersPage";
 import { ThingModelsPage } from "./pages/ThingModelsPage";
 
-type SessionState = "checking" | "authenticated" | "unauthenticated";
+type SessionState = "checking" | "authenticated" | "unauthenticated" | "unavailable";
 
 export function App({
   api: suppliedApi,
+  agentApi: suppliedAgentApi,
   demo: suppliedDemo,
 }: {
   api?: IoTApi;
+  agentApi?: AgentApi;
   demo?: boolean;
-  } = {}) {
+} = {}) {
   const demo =
     suppliedDemo ??
     (new URLSearchParams(window.location.search).get("demo") === "1");
   const [sessionState, setSessionState] = useState<SessionState>(
     demo ? "authenticated" : "checking",
   );
+  const [authEnabled, setAuthEnabled] = useState(!demo);
   const api = useMemo<IoTApi>(
     () =>
       suppliedApi ??
       (demo ? new DemoApiClient() : new HttpApiClient()),
     [demo, suppliedApi],
   );
+  const agentApi = useMemo<AgentApi>(
+    () => suppliedAgentApi ?? new AgentApiClient(),
+    [suppliedAgentApi],
+  );
 
   useEffect(() => {
     if (demo) {
+      setAuthEnabled(false);
       setSessionState("authenticated");
       return;
     }
@@ -48,11 +61,18 @@ export function App({
     });
     setSessionState("checking");
     api.bootstrapSession().then(
-      () => {
+      (session) => {
+        if (active) setAuthEnabled(session.auth_enabled);
         if (active) setSessionState("authenticated");
       },
-      () => {
-        if (active) setSessionState("unauthenticated");
+      (reason) => {
+        if (!active) return;
+        if (reason instanceof ApiError && reason.status === 401) {
+          setSessionState("unauthenticated");
+        } else {
+          setAuthEnabled(false);
+          setSessionState("unavailable");
+        }
       },
     );
     return () => {
@@ -63,27 +83,45 @@ export function App({
 
   return (
     <ApiProvider api={api}>
-      {sessionState === "checking" ? (
-        <SessionLoading />
-      ) : sessionState === "unauthenticated" ? (
-        <SessionGate api={api} onAuthenticated={() => setSessionState("authenticated")} />
-      ) : (
-        <BrowserRouter>
-          <Routes>
-            <Route element={<AppShell demo={demo} />}>
-              <Route index element={<OverviewPage />} />
-              <Route path="thing-models" element={<ThingModelsPage />} />
-              <Route path="devices" element={<DevicesPage />} />
-              <Route path="devices/:deviceId" element={<DeviceDetailPage />} />
-              <Route path="operations" element={<OperationsPage />} />
-              <Route path="events" element={<EventsPage />} />
-              <Route path="providers" element={<ProvidersPage />} />
-              <Route path="message-channels" element={<MessageChannelsPage />} />
-              <Route path="*" element={<Navigate to="/" replace />} />
-            </Route>
-          </Routes>
-        </BrowserRouter>
-      )}
+      <AgentApiProvider api={agentApi}>
+        {sessionState === "checking" ? (
+          <SessionLoading />
+        ) : sessionState === "unauthenticated" ? (
+          <SessionGate
+            api={api}
+            onAuthenticated={() => {
+              setAuthEnabled(true);
+              setSessionState("authenticated");
+            }}
+          />
+        ) : (
+          <BrowserRouter>
+            <Routes>
+              <Route
+                element={(
+                  <AppShell
+                    demo={demo}
+                    authEnabled={authEnabled}
+                    iotUnavailable={sessionState === "unavailable"}
+                  />
+                )}
+              >
+                <Route index element={<CommandCenterPage />} />
+                <Route path="audit" element={<AuditCenterPage />} />
+                <Route path="overview" element={<OverviewPage />} />
+                <Route path="thing-models" element={<ThingModelsPage />} />
+                <Route path="devices" element={<DevicesPage />} />
+                <Route path="devices/:deviceId" element={<DeviceDetailPage />} />
+                <Route path="operations" element={<OperationsPage />} />
+                <Route path="events" element={<EventsPage />} />
+                <Route path="providers" element={<ProvidersPage />} />
+                <Route path="message-channels" element={<MessageChannelsPage />} />
+                <Route path="*" element={<Navigate to="/" replace />} />
+              </Route>
+            </Routes>
+          </BrowserRouter>
+        )}
+      </AgentApiProvider>
     </ApiProvider>
   );
 }

@@ -6,7 +6,11 @@ export default defineConfig({
   server: {
     host: "127.0.0.1",
     proxy: {
-      "/api": "http://127.0.0.1:8090",
+      "/agent-api": {
+        target: "http://127.0.0.1:8080",
+        rewrite: (path) => path.replace(/^\/agent-api/, "/api"),
+      },
+      "/api/v1": "http://127.0.0.1:8090",
     },
   },
   test: {

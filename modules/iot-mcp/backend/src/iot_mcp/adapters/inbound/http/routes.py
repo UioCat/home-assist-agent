@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request, Response
@@ -42,8 +42,12 @@ router = APIRouter(prefix="/api/v1")
 
 
 @router.post("/auth/session")
-async def create_session(request: Request, response: Response) -> dict[str, str]:
+async def create_session(
+    request: Request, response: Response
+) -> dict[str, bool | str | None]:
     settings = request.app.state.settings
+    if not settings.auth_enabled:
+        return _disabled_auth_session()
     verify_admin_token(request, settings)
     actor = sorted(settings.allowed_confirmation_actors)[0]
     session, csrf = SessionCodec(
@@ -58,15 +62,33 @@ async def create_session(request: Request, response: Response) -> dict[str, str]
         samesite=settings.cookie_same_site,
         path="/api/v1",
     )
-    return {"csrf_token": csrf}
+    return {
+        "auth_enabled": True,
+        "csrf_token": csrf,
+        "expires_at": (
+            datetime.now(UTC) + timedelta(seconds=settings.session_ttl_seconds)
+        ).isoformat(),
+    }
 
 
 @router.get("/auth/session")
-async def get_session(request: Request) -> dict[str, str]:
-    payload = verified_session_payload(request, request.app.state.settings)
+async def get_session(request: Request) -> dict[str, bool | str | None]:
+    settings = request.app.state.settings
+    if not settings.auth_enabled:
+        return _disabled_auth_session()
+    payload = verified_session_payload(request, settings)
     return {
+        "auth_enabled": True,
         "csrf_token": payload["csrf"],
         "expires_at": datetime.fromtimestamp(payload["exp"], UTC).isoformat(),
+    }
+
+
+def _disabled_auth_session() -> dict[str, bool | str | None]:
+    return {
+        "auth_enabled": False,
+        "csrf_token": None,
+        "expires_at": None,
     }
 
 
@@ -244,6 +266,14 @@ async def list_devices(
     return [device.model_dump(mode="json") for device in devices]
 
 
+@router.get("/device-cards")
+async def list_device_cards(
+    request: Request, _: TrustedPrincipal = Depends(authenticated)
+) -> list[dict[str, Any]]:
+    cards = await request.app.state.queries.list_device_cards()
+    return [dict(card) for card in cards]
+
+
 @router.get("/devices/{device_id}")
 async def get_device(
     device_id: str,
@@ -282,7 +312,9 @@ async def get_device_state(
     request: Request,
     _: TrustedPrincipal = Depends(authenticated),
 ) -> dict[str, Any]:
-    state = await request.app.state.queries.read_state(device_id)
+    state = await request.app.state.queries.read_state(
+        device_id, message_id=request.state.message_id
+    )
     return state.model_dump(mode="json")
 
 
@@ -299,6 +331,7 @@ async def write_properties(
         action=ControlAction.properties(payload.values),
         principal=principal,
         idempotency_key=request.headers.get("idempotency-key", ""),
+        message_id=request.state.message_id,
     )
     if operation.status is OperationStatus.PENDING_CONFIRMATION:
         response.status_code = 202
@@ -319,6 +352,7 @@ async def invoke_service(
         action=ControlAction.invoke_service(identifier, payload.inputs),
         principal=principal,
         idempotency_key=request.headers.get("idempotency-key", ""),
+        message_id=request.state.message_id,
     )
     if operation.status is OperationStatus.PENDING_CONFIRMATION:
         response.status_code = 202
@@ -378,6 +412,7 @@ async def approve_confirmation(
         decision="approve",
         actor=principal.actor_id,
         action_hash=payload.action_hash,
+        message_id=request.state.message_id,
     )
     return operation_public_dto(operation)
 
@@ -394,6 +429,7 @@ async def reject_confirmation(
         decision="reject",
         actor=principal.actor_id,
         action_hash=payload.action_hash,
+        message_id=request.state.message_id,
     )
     return operation_public_dto(operation)
 
@@ -415,7 +451,7 @@ async def list_providers(
     result: list[dict[str, Any]] = []
     for provider_id, provider in sorted(request.app.state.providers.items()):
         try:
-            health = await provider.health()
+            health = await provider.health(message_id=request.state.message_id)
         except Exception:
             status = request.app.state.provider_status.get(provider_id, "unavailable")
             detail = "provider health check failed"
@@ -471,6 +507,7 @@ async def webhook_callback(
         decision=payload.decision,
         actor=payload.actor,
         action_hash=payload.action_hash,
+        message_id=request.state.message_id,
     )
     return operation_public_dto(operation)
 
@@ -491,7 +528,8 @@ async def sync_provider(
         request.app.state.models,
         request.app.state.devices,
         request.app.state.states,
-    ).sync()
+        request.app.state.audit,
+    ).sync(message_id=request.state.message_id, trigger="manual")
     return {
         "discovered": result.discovered,
         "upserted": result.upserted,

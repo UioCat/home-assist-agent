@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections import defaultdict
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterable
 from typing import Any
+from uuid import uuid4
 
 from iot_mcp.adapters.outbound.home_assistant.client import (
     HomeAssistantClient,
@@ -14,6 +15,7 @@ from iot_mcp.adapters.outbound.home_assistant.client import (
     HomeAssistantTimeout,
 )
 from iot_mcp.adapters.outbound.home_assistant.mapping import (
+    availability_from_state,
     capability_fingerprint,
     map_ha_state,
     properties_from_state,
@@ -64,24 +66,27 @@ class HomeAssistantDeviceProvider:
         self._event_source = event_source
         self._device_id_resolver = device_id_resolver
         self._routes: dict[str, dict[str, dict[str, Any]]] = {}
+        self._availability_by_ref: dict[str, dict[str, str]] = {}
 
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    async def health(self) -> ProviderHealth:
+    async def health(self, *, message_id: str | None = None) -> ProviderHealth:
+        operation_id = message_id or str(uuid4())
         try:
-            await self._client.get_states()
+            await self._client.get_states(message_id=operation_id)
         except HomeAssistantError as error:
             return ProviderHealth(status=error.category, detail=str(error))
         return ProviderHealth(status="healthy")
 
-    async def discover(self) -> ProviderInventory:
-        entity_registry = await self._client.get_entity_registry()
-        device_registry = await self._client.get_device_registry()
-        area_registry = await self._client.get_area_registry()
-        states = await self._client.get_states()
-        services = await self._client.get_services()
-        config = await self._client.get_config()
+    async def discover(self, *, message_id: str | None = None) -> ProviderInventory:
+        operation_id = message_id or str(uuid4())
+        entity_registry = await self._client.get_entity_registry(message_id=operation_id)
+        device_registry = await self._client.get_device_registry(message_id=operation_id)
+        area_registry = await self._client.get_area_registry(message_id=operation_id)
+        states = await self._client.get_states(message_id=operation_id)
+        services = await self._client.get_services(message_id=operation_id)
+        config = await self._client.get_config(message_id=operation_id)
 
         entity_entries = {
             entry["entity_id"]: entry
@@ -115,6 +120,8 @@ class HomeAssistantDeviceProvider:
             if domain not in {"light", "switch", "climate", "lock"}:
                 continue
             registry_entry = entity_entries.get(entity_id, {})
+            if registry_entry.get("entity_category") in {"config", "diagnostic"}:
+                continue
             device_id = registry_entry.get("device_id")
             if self._device_id_resolver is not None:
                 device_id = self._device_id_resolver(state)
@@ -128,6 +135,7 @@ class HomeAssistantDeviceProvider:
             registry_by_ref[mapped.external_ref].append(registry_entry)
 
         self._routes = {}
+        self._availability_by_ref = {}
         discovered: list[ProviderDevice] = []
         for external_ref, entities in sorted(grouped.items()):
             device_id = (
@@ -173,6 +181,16 @@ class HomeAssistantDeviceProvider:
                     }
                 ),
             }
+            device_type, device_type_label = _classify_device_type(
+                registry_device,
+                assembled,
+            )
+            metadata.update(
+                {
+                    "device_type": device_type,
+                    "device_type_label": device_type_label,
+                }
+            )
             assembled = assembled.model_copy(
                 update={
                     "display_name": str(display_name),
@@ -191,6 +209,11 @@ class HomeAssistantDeviceProvider:
                     "write_binding": binding.get("write_binding"),
                 }
                 for binding in assembled.feature_bindings
+            }
+            self._availability_by_ref[external_ref] = {
+                entity_id: entity.state.availability
+                for entity in entities
+                for entity_id in entity.metadata.get("entity_ids", [])
             }
             discovered.append(assembled)
         return ProviderInventory(
@@ -259,7 +282,12 @@ class HomeAssistantDeviceProvider:
         assembled = seed.model_copy(
             update={
                 "feature_bindings": bindings,
-                "state": seed.state.model_copy(update={"values": values}),
+                "state": seed.state.model_copy(
+                    update={
+                        "values": values,
+                        "availability": _aggregate_availability(entities),
+                    }
+                ),
                 "metadata": {
                     "entity_ids": sorted(
                         {
@@ -308,8 +336,13 @@ class HomeAssistantDeviceProvider:
         return route
 
     async def read_state(
-        self, device_ref: str, selectors: list[str] | None = None
+        self,
+        device_ref: str,
+        selectors: list[str] | None = None,
+        *,
+        message_id: str | None = None,
     ) -> DeviceState:
+        operation_id = message_id or str(uuid4())
         routes = self._routes.get(device_ref)
         if routes is None:
             raise HomeAssistantError(
@@ -335,12 +368,25 @@ class HomeAssistantDeviceProvider:
         entity_ids = {
             str(route["entity_id"]) for route in selected_routes.values()
         }
-        raw_by_entity = {
-            entity_id: properties_from_state(
-                await self._client.get_state(entity_id)
+        states_by_entity = {
+            entity_id: await self._client.get_state(
+                entity_id, message_id=operation_id
             )
             for entity_id in entity_ids
         }
+        raw_by_entity = {
+            entity_id: properties_from_state(state)
+            for entity_id, state in states_by_entity.items()
+        }
+        availability_by_entity = self._availability_by_ref.setdefault(
+            device_ref, {}
+        )
+        availability_by_entity.update(
+            {
+                entity_id: availability_from_state(state)
+                for entity_id, state in states_by_entity.items()
+            }
+        )
         values = {
             identifier: raw_by_entity[str(route["entity_id"])][
                 str(route.get("capability") or identifier)
@@ -349,14 +395,27 @@ class HomeAssistantDeviceProvider:
             if str(route.get("capability") or identifier)
             in raw_by_entity[str(route["entity_id"])]
         }
-        return DeviceState(device_ref=device_ref, values=values)
+        return DeviceState(
+            device_ref=device_ref,
+            values=values,
+            availability=_aggregate_availability_values(
+                availability_by_entity.values()
+            ),
+        )
 
     async def write_properties(
-        self, device_ref: str, values: dict[str, Any]
+        self,
+        device_ref: str,
+        values: dict[str, Any],
+        *,
+        message_id: str | None = None,
     ) -> ProviderResult:
+        operation_id = message_id or str(uuid4())
         service_called = False
         try:
-            before = await self.read_state(device_ref, list(values))
+            before = await self.read_state(
+                device_ref, list(values), message_id=operation_id
+            )
             routes = {
                 identifier: self._selector(
                     device_ref,
@@ -383,10 +442,12 @@ class HomeAssistantDeviceProvider:
                 entity_id, provider_values
             )
             response = await self._client.call_service(
-                domain, service, payload
+                domain, service, payload, message_id=operation_id
             )
             service_called = True
-            after = await self.read_state(device_ref, list(values))
+            after = await self.read_state(
+                device_ref, list(values), message_id=operation_id
+            )
         except HomeAssistantTimeout:
             raise
         except HomeAssistantError as error:
@@ -419,7 +480,10 @@ class HomeAssistantDeviceProvider:
         device_ref: str,
         service: str,
         inputs: dict[str, Any],
+        *,
+        message_id: str | None = None,
     ) -> ProviderResult:
+        operation_id = message_id or str(uuid4())
         try:
             route = self._selector(
                 device_ref, service, feature_type="service"
@@ -428,6 +492,7 @@ class HomeAssistantDeviceProvider:
                 str(route["domain"]),
                 str(route["service"]),
                 {"entity_id": route["entity_id"], **inputs},
+                message_id=operation_id,
             )
             return ProviderResult(
                 ok=True, data={"provider_response": response}
@@ -441,11 +506,18 @@ class HomeAssistantDeviceProvider:
                 message=str(error),
             )
 
-    async def subscribe(self, sink: EventSink) -> Subscription:
-        source = self._event_source or self._client.websocket_events
+    async def subscribe(
+        self, sink: EventSink, *, message_id: str | None = None
+    ) -> Subscription:
+        operation_id = message_id or str(uuid4())
 
         async def consume() -> None:
-            async for message in source():
+            source = (
+                self._event_source()
+                if self._event_source is not None
+                else self._client.websocket_events(message_id=operation_id)
+            )
+            async for message in source:
                 event = self._map_event(message)
                 if event is None:
                     continue
@@ -479,11 +551,16 @@ class HomeAssistantDeviceProvider:
         )
         raw = properties_from_state(new_state)
         if ref is None:
+            if self._routes:
+                return None
             return ProviderEvent(
                 device_ref=f"entity:{entity_id}",
                 identifier="state_changed",
                 values=raw,
+                availability=availability_from_state(new_state),
             )
+        availability_by_entity = self._availability_by_ref.setdefault(ref, {})
+        availability_by_entity[entity_id] = availability_from_state(new_state)
         values = {
             identifier: raw[capability]
             for identifier, route in self._routes[ref].items()
@@ -496,7 +573,64 @@ class HomeAssistantDeviceProvider:
             device_ref=ref,
             identifier="state_changed",
             values=values,
+            availability=_aggregate_availability_values(
+                availability_by_entity.values()
+            ),
         )
+
+
+_DEVICE_TYPE_LABELS = {
+    "light": "灯具",
+    "outlet": "插座",
+    "climate": "温控",
+    "heater": "取暖器",
+    "humidifier": "加湿器",
+    "lock": "门锁",
+    "appliance": "家电",
+    "switch": "开关",
+    "other": "其他",
+}
+
+
+def _aggregate_availability(entities: list[ProviderDevice]) -> str:
+    return _aggregate_availability_values(
+        entity.state.availability for entity in entities
+    )
+
+
+def _aggregate_availability_values(values: Iterable[str]) -> str:
+    availability = set(values)
+    if "online" in availability:
+        return "online"
+    if "unknown" in availability:
+        return "unknown"
+    return "offline"
+
+
+def _classify_device_type(
+    registry_device: dict[str, Any], assembled: ProviderDevice
+) -> tuple[str, str]:
+    haystack = " ".join(
+        str(registry_device.get(key) or "")
+        for key in ("model", "name", "name_by_user")
+    ).casefold()
+    keyword_types = (
+        ("outlet", ("plug", "outlet", "插座", "排插")),
+        ("heater", ("heater", "radiator", "取暖", "电暖", "暖风")),
+        ("humidifier", ("humidifier", "加湿")),
+        ("appliance", ("cooker", "oven", "kettle", "电磁炉", "烤箱", "热水壶")),
+        ("lock", ("lock", "门锁", "智能锁")),
+        ("light", ("lamp", "light", "灯具", "挂灯", "台灯", "灯带")),
+    )
+    for device_type, keywords in keyword_types:
+        if any(keyword in haystack for keyword in keywords):
+            return device_type, _DEVICE_TYPE_LABELS[device_type]
+
+    domains = set(assembled.metadata.get("domains") or ())
+    for device_type in ("lock", "climate", "light", "switch"):
+        if device_type in domains:
+            return device_type, _DEVICE_TYPE_LABELS[device_type]
+    return "other", _DEVICE_TYPE_LABELS["other"]
 
 
 def _safe_registry_metadata(value: dict[str, Any]) -> dict[str, Any]:

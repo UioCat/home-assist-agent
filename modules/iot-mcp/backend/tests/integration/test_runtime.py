@@ -15,7 +15,7 @@ from iot_mcp.ports.device_provider import ProviderEvent
 class FailingProvider(MockDeviceProvider):
     provider_id = "failing"
 
-    async def discover(self):
+    async def discover(self, *, message_id: str | None = None):
         raise RuntimeError("provider secret must not leak")
 
 
@@ -40,12 +40,12 @@ class LifecycleProvider(MockDeviceProvider):
         self.sink = None
         self.subscriptions: list[_BlockingSubscription] = []
 
-    async def discover(self):
+    async def discover(self, *, message_id: str | None = None):
         self.discover_calls += 1
-        inventory = await super().discover()
+        inventory = await super().discover(message_id=message_id)
         return inventory.model_copy(update={"provider_id": self.provider_id})
 
-    async def subscribe(self, sink):
+    async def subscribe(self, sink, *, message_id: str | None = None):
         self.subscribe_calls += 1
         if self.subscribe_calls == 1:
             raise RuntimeError("injected disconnect")

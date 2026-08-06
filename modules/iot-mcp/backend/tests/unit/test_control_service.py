@@ -38,11 +38,37 @@ class CountingProvider(MockDeviceProvider):
         self.calls = 0
         self.timeout = timeout
 
-    async def write_properties(self, device_ref, values) -> ProviderResult:
+    async def write_properties(
+        self, device_ref, values, *, message_id: str | None = None
+    ) -> ProviderResult:
         self.calls += 1
         if self.timeout:
             raise TimeoutError
-        return await super().write_properties(device_ref, values)
+        return await super().write_properties(
+            device_ref, values, message_id=message_id
+        )
+
+
+class MessageRecordingProvider(CountingProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.message_ids: list[str | None] = []
+
+    async def read_state(
+        self, device_ref, selectors=None, *, message_id: str | None = None
+    ):
+        self.message_ids.append(message_id)
+        return await super().read_state(
+            device_ref, selectors, message_id=message_id
+        )
+
+    async def write_properties(
+        self, device_ref, values, *, message_id: str | None = None
+    ) -> ProviderResult:
+        self.message_ids.append(message_id)
+        return await super().write_properties(
+            device_ref, values, message_id=message_id
+        )
 
 
 async def _services(
@@ -128,6 +154,82 @@ async def test_human_high_risk_executes_without_confirmation(tmp_path) -> None:
     assert operation.status is OperationStatus.SUCCEEDED
     assert await confirmations.get_by_operation(operation.operation_id) is None
     assert provider.calls == 1
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["offline", "unknown", "missing"])
+async def test_unavailable_device_is_rejected_before_provider_side_effect(
+    tmp_path, status: str
+) -> None:
+    engine, provider, devices, _, _, control, _ = await _services(
+        tmp_path, risk=RiskLevel.LOW
+    )
+    device = await devices.get_device("device-1")
+    assert device is not None
+    await devices.upsert_device(device.model_copy(update={"status": status}))
+
+    with pytest.raises(SafeControlError) as raised:
+        await control.submit(
+            device_id="device-1",
+            action=ControlAction.properties({"PowerSwitch": False}),
+            principal=TrustedPrincipal.web_session("owner"),
+            idempotency_key=f"unavailable-{status}",
+        )
+
+    assert raised.value.code == "device_unavailable"
+    assert provider.calls == 0
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_device_becoming_offline_while_confirmation_is_pending_never_executes(
+    tmp_path,
+) -> None:
+    engine, provider, devices, _, confirmations, control, confirmation_service = (
+        await _services(tmp_path, risk=RiskLevel.HIGH)
+    )
+    operation = await control.submit(
+        device_id="device-1",
+        action=ControlAction.properties({"LockState": "UNLOCK"}),
+        principal=TrustedPrincipal.mcp("pending-offline"),
+        idempotency_key="pending-offline",
+    )
+    pending = await confirmations.get_by_operation(operation.operation_id)
+    device = await devices.get_device("device-1")
+    assert pending is not None and device is not None
+    await devices.upsert_device(device.model_copy(update={"status": "offline"}))
+
+    result = await confirmation_service.decide(
+        confirmation_id=pending.confirmation_id,
+        decision="approve",
+        actor="owner",
+        action_hash=pending.action_hash,
+    )
+
+    assert result.status is OperationStatus.FAILED
+    assert result.result == {"code": "device_unavailable", "retryable": True}
+    assert provider.calls == 0
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_control_forwards_one_message_id_to_all_provider_calls(tmp_path) -> None:
+    provider = MessageRecordingProvider()
+    engine, _, _, _, _, control, _ = await _services(
+        tmp_path, risk=RiskLevel.LOW, provider=provider
+    )
+
+    operation = await control.submit(
+        device_id="device-1",
+        action=ControlAction.properties({"PowerSwitch": False}),
+        principal=TrustedPrincipal.web_session("owner"),
+        idempotency_key="message-chain",
+        message_id="message-control",
+    )
+
+    assert operation.status is OperationStatus.SUCCEEDED
+    assert provider.message_ids == ["message-control", "message-control"]
     await engine.dispose()
 
 

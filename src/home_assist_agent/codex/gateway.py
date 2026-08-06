@@ -1,15 +1,21 @@
 import asyncio
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 import json
 from pathlib import Path
 import tempfile
-from typing import Callable, Protocol, TypeVar
+from typing import AsyncIterator, Awaitable, Callable, Protocol, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
-from home_assist_agent.audit.recorder import AuditRecorderProtocol
+from home_assist_agent.audit.recorder import (
+    AuditRecorderProtocol,
+    redact_sensitive,
+)
 from home_assist_agent.commands.models import (
     AnswerResult,
+    CommandResponse,
     DevicePlanResult,
     ReasoningLevel,
     RouteDecision,
@@ -28,6 +34,19 @@ class ProcessResult:
     returncode: int
     stdout: str
     stderr: str
+
+
+@dataclass(slots=True)
+class _ConversationTurn:
+    conversation_id: str
+    thread_id: str | None
+    bind_thread: Callable[[str], Awaitable[None]]
+
+
+_active_conversation: ContextVar[_ConversationTurn | None] = ContextVar(
+    "active_codex_conversation",
+    default=None,
+)
 
 
 class ProcessRunnerProtocol(Protocol):
@@ -102,6 +121,25 @@ class CodexGateway:
             raise ValueError("audit recorder is required")
         self._audit = audit
         self._schema_dir = schema_dir or (Path(__file__).parent / "schemas")
+
+    @asynccontextmanager
+    async def conversation(
+        self,
+        *,
+        conversation_id: str,
+        thread_id: str | None,
+        bind_thread: Callable[[str], Awaitable[None]],
+    ) -> AsyncIterator[None]:
+        turn = _ConversationTurn(
+            conversation_id=conversation_id,
+            thread_id=thread_id,
+            bind_thread=bind_thread,
+        )
+        token = _active_conversation.set(turn)
+        try:
+            yield
+        finally:
+            _active_conversation.reset(token)
 
     async def route(
         self,
@@ -209,6 +247,28 @@ class CodexGateway:
             invalid_output_message="普通回答没有返回有效的结构化结果。",
         )
 
+    async def commit_result(
+        self,
+        *,
+        command: str,
+        response: CommandResponse,
+        message_id: str,
+        correlation_id: str | None = None,
+        causation_id: str | None = None,
+    ) -> AnswerResult:
+        return await self._run_structured(
+            purpose="conversation_commit",
+            reasoning="low",
+            prompt=self._build_commit_prompt(command, response),
+            schema_path=self._schema_dir / "answer_result.json",
+            result_type=AnswerResult,
+            message_id=message_id,
+            correlation_id=correlation_id,
+            causation_id=causation_id,
+            invalid_output_code="invalid_conversation_commit_output",
+            invalid_output_message="会话结果没有成功写入上下文。",
+        )
+
     async def _run_structured(
         self,
         *,
@@ -224,33 +284,56 @@ class CodexGateway:
         invalid_output_message: str,
         result_validator: Callable[[StructuredResult], None] | None = None,
     ) -> StructuredResult:
+        safe_prompt = str(redact_sensitive(prompt))
         with tempfile.TemporaryDirectory(prefix="home-assist-codex-") as temp_dir:
             output_path = Path(temp_dir) / "last-message.json"
-            args = [
-                self._codex_binary,
-                "--ask-for-approval",
-                "never",
-                "exec",
-                "--ignore-user-config",
-                "--ephemeral",
-                "--sandbox",
-                "read-only",
-                "--output-schema",
-                str(schema_path),
-                "--output-last-message",
-                str(output_path),
-                "--config",
-                f"model_reasoning_effort={reasoning}",
-                "-",
-            ]
+            conversation = _active_conversation.get()
+            if conversation is not None and conversation.thread_id is not None:
+                args = [
+                    self._codex_binary,
+                    "exec",
+                    "resume",
+                    "--json",
+                    "--output-schema",
+                    str(schema_path),
+                    "--output-last-message",
+                    str(output_path),
+                    "--config",
+                    f"model_reasoning_effort={reasoning}",
+                    conversation.thread_id,
+                    "-",
+                ]
+            else:
+                args = [
+                    self._codex_binary,
+                    "--ask-for-approval",
+                    "never",
+                    "exec",
+                    "--ignore-user-config",
+                    "--json",
+                    "--sandbox",
+                    "read-only",
+                    "--output-schema",
+                    str(schema_path),
+                    "--output-last-message",
+                    str(output_path),
+                    "--config",
+                    f"model_reasoning_effort={reasoning}",
+                    "-",
+                ]
             timeout_seconds = self._timeouts[reasoning]
             await self._audit.record(
                 message_id=message_id,
+                conversation_id=(
+                    conversation.conversation_id
+                    if conversation is not None
+                    else None
+                ),
                 event_type="codex.request",
                 service="codex_cli",
                 payload={
                     "purpose": purpose,
-                    "prompt": prompt,
+                    "prompt": safe_prompt,
                     "reasoning": reasoning,
                     "parameters": {
                         "args": args,
@@ -263,12 +346,17 @@ class CodexGateway:
             try:
                 result = await self._runner.run(
                     args=args,
-                    stdin=prompt,
+                    stdin=safe_prompt,
                     timeout_seconds=timeout_seconds,
                 )
             except DependencyError as error:
                 await self._audit.record(
                     message_id=message_id,
+                    conversation_id=(
+                        conversation.conversation_id
+                        if conversation is not None
+                        else None
+                    ),
                     event_type="codex.response",
                     service="codex_cli",
                     payload={
@@ -288,12 +376,29 @@ class CodexGateway:
                 raise
             if result.returncode != 0:
                 detail = result.stderr.strip().splitlines()[-1:] or ["unknown error"]
+                is_resume = (
+                    conversation is not None
+                    and conversation.thread_id is not None
+                )
                 error = DependencyError(
-                    "codex_failed",
-                    f"本地 Codex 执行失败：{detail[0]}",
+                    (
+                        "conversation_resume_failed"
+                        if is_resume
+                        else "codex_failed"
+                    ),
+                    (
+                        f"Codex 会话恢复失败：{detail[0]}"
+                        if is_resume
+                        else f"本地 Codex 执行失败：{detail[0]}"
+                    ),
                 )
                 await self._audit.record(
                     message_id=message_id,
+                    conversation_id=(
+                        conversation.conversation_id
+                        if conversation is not None
+                        else None
+                    ),
                     event_type="codex.response",
                     service="codex_cli",
                     payload={
@@ -310,7 +415,45 @@ class CodexGateway:
                     correlation_id=correlation_id,
                     causation_id=causation_id,
                 )
+                if is_resume and conversation is not None:
+                    await self._audit.record(
+                        message_id=message_id,
+                        conversation_id=conversation.conversation_id,
+                        event_type="conversation.resume_failed",
+                        service="codex_cli",
+                        payload={"error": error.message},
+                        status="error",
+                        error_code=error.code,
+                        correlation_id=correlation_id,
+                        causation_id=causation_id,
+                    )
                 raise error
+            if conversation is not None and conversation.thread_id is None:
+                try:
+                    thread_id = self._parse_thread_id(result.stdout)
+                    await conversation.bind_thread(thread_id)
+                    conversation.thread_id = thread_id
+                except DependencyError as error:
+                    await self._audit.record(
+                        message_id=message_id,
+                        conversation_id=conversation.conversation_id,
+                        event_type="codex.response",
+                        service="codex_cli",
+                        payload={
+                            "purpose": purpose,
+                            "returncode": result.returncode,
+                            "stdout": result.stdout,
+                            "stderr": result.stderr,
+                            "output": None,
+                            "structured_output": None,
+                            "error": error.message,
+                        },
+                        status="error",
+                        error_code=error.code,
+                        correlation_id=correlation_id,
+                        causation_id=causation_id,
+                    )
+                    raise
             output: str | None = None
             try:
                 output = output_path.read_text(encoding="utf-8")
@@ -329,6 +472,11 @@ class CodexGateway:
                 )
                 await self._audit.record(
                     message_id=message_id,
+                    conversation_id=(
+                        conversation.conversation_id
+                        if conversation is not None
+                        else None
+                    ),
                     event_type="codex.response",
                     service="codex_cli",
                     payload={
@@ -348,6 +496,11 @@ class CodexGateway:
                 raise dependency_error from error
             await self._audit.record(
                 message_id=message_id,
+                conversation_id=(
+                    conversation.conversation_id
+                    if conversation is not None
+                    else None
+                ),
                 event_type="codex.response",
                 service="codex_cli",
                 payload={
@@ -362,6 +515,25 @@ class CodexGateway:
                 causation_id=causation_id,
             )
             return structured_result
+
+    @staticmethod
+    def _parse_thread_id(stdout: str) -> str:
+        for line in stdout.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            if event.get("type") != "thread.started":
+                continue
+            thread_id = event.get("thread_id")
+            if isinstance(thread_id, str) and thread_id.strip():
+                return thread_id.strip()
+        raise DependencyError(
+            "codex_thread_missing",
+            "本地 Codex 没有返回可恢复的会话标识。",
+        )
 
     @staticmethod
     def _build_route_prompt(command: str) -> str:
@@ -454,6 +626,11 @@ class CodexGateway:
                 "只能引用下方给出的 candidate_id，不能生成或猜测实体标识。",
                 "只有明确匹配时返回 selected；存在多个合理目标时返回 "
                 "ambiguous；没有合理目标时返回 no_match。",
+                "semantic_fallback 表示确定性精确匹配未命中，但候选已经通过"
+                "家庭、可用性和动作能力过滤；请结合名称、区域、设备类型和"
+                "用户原始表达判断。",
+                "不能仅因缺少精确字符串匹配就返回 no_match；如果一个或多个"
+                "候选在语义上合理，应分别返回 selected 或 ambiguous。",
                 "ambiguous 必须给出 2 到 3 个备选编号；no_match 不返回备选。",
                 "reason 只解释语义依据，不参与权限或安全判断。",
                 "用户原始输入：",
@@ -506,5 +683,26 @@ class CodexGateway:
                 "直接回答用户问题，不讨论内部路由、工具或设备控制流程。",
                 "用户输入：",
                 json.dumps(command, ensure_ascii=False),
+            ]
+        )
+
+    @staticmethod
+    def _build_commit_prompt(
+        command: str,
+        response: CommandResponse,
+    ) -> str:
+        return "\n".join(
+            [
+                "这是当前用户消息的真实业务执行结果。",
+                "请把结果作为后续对话上下文；不得把计划当成已经执行的事实。",
+                "只返回一个简短的同步确认 message，不提出新设备动作。",
+                "用户消息：",
+                json.dumps(command, ensure_ascii=False),
+                "真实业务结果：",
+                json.dumps(
+                    response.model_dump(mode="json"),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
             ]
         )

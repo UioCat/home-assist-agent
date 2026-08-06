@@ -25,6 +25,9 @@ storage:
   database_url:
     env: IOT_MCP_DATABASE_URL
     value: sqlite+aiosqlite:///./iot_mcp.db
+  audit_database_path:
+    env: IOT_MCP_AUDIT_DATABASE_PATH
+    value: ./iot_mcp_audit.db
 
 runtime:
   reconcile_interval_seconds:
@@ -36,6 +39,9 @@ runtime:
 
 auth:
   # Replace every placeholder and inject it from a secret manager.
+  enabled:
+    env: IOT_MCP_AUTH_ENABLED
+    value: true
   admin_token:
     env: IOT_MCP_ADMIN_TOKEN
     value: replace-with-admin-token

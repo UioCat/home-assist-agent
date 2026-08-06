@@ -27,6 +27,11 @@ from iot_mcp.application.sync_service import DeviceSyncService
 from iot_mcp.ports.device_provider import ProviderEvent, ProviderInventory
 
 
+class RecordingAudit:
+    async def record(self, **_: object) -> None:
+        return None
+
+
 async def _empty_registry() -> dict[str, str | None]:
     return {}
 
@@ -68,16 +73,74 @@ async def _grouped_lock_registry() -> list[dict[str, str]]:
     ]
 
 
-def _client(calls: list[httpx.Request], registry_loader=_empty_registry) -> HomeAssistantClient:
+async def _physical_type_registry() -> dict[str, list[dict[str, object]]]:
+    return {
+        "entities": [
+            {
+                "id": "entity-light",
+                "entity_id": "light.desk",
+                "device_id": "plug-device",
+                "entity_category": None,
+            },
+            {
+                "id": "entity-climate",
+                "entity_id": "climate.living",
+                "device_id": "heater-device",
+                "entity_category": None,
+            },
+            {
+                "id": "entity-lock",
+                "entity_id": "lock.front",
+                "device_id": "lock-device",
+                "entity_category": None,
+            },
+        ],
+        "devices": [
+            {
+                "id": "plug-device",
+                "name": "电脑",
+                "manufacturer": "Gosund",
+                "model": "cuco.plug.v3",
+            },
+            {
+                "id": "heater-device",
+                "name": "客厅设备",
+                "manufacturer": "Xiaomi",
+                "model": "smart.heater.v2",
+            },
+            {
+                "id": "lock-device",
+                "name": "前门",
+                "manufacturer": "Example",
+                "model": "door.lock.v1",
+            },
+        ],
+        "areas": [],
+    }
+
+
+def _client(
+    calls: list[httpx.Request],
+    registry_loader=_empty_registry,
+    *,
+    state_overrides: dict[str, dict[str, object]] | None = None,
+) -> HomeAssistantClient:
     return HomeAssistantClient(
         "http://ha.test",
         "not-a-real-token",
-        client=httpx.AsyncClient(transport=_transport(calls)),
+        client=httpx.AsyncClient(
+            transport=_transport(calls, state_overrides=state_overrides)
+        ),
         registry_loader=registry_loader,
+        audit=RecordingAudit(),
     )
 
 
-def _transport(calls: list[httpx.Request]) -> httpx.MockTransport:
+def _transport(
+    calls: list[httpx.Request],
+    *,
+    state_overrides: dict[str, dict[str, object]] | None = None,
+) -> httpx.MockTransport:
     states = {
         "light.desk": {"entity_id": "light.desk", "state": "on", "attributes": {"brightness": 128}},
         "climate.living": {
@@ -87,6 +150,8 @@ def _transport(calls: list[httpx.Request]) -> httpx.MockTransport:
         },
         "lock.front": {"entity_id": "lock.front", "state": "locked", "attributes": {}},
     }
+    if state_overrides:
+        states.update(state_overrides)
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request)
@@ -255,11 +320,15 @@ async def test_sync_upserts_and_marks_missing_and_refreshes_snapshots(tmp_path) 
     sessions = create_session_factory(engine)
     device_repo = DeviceRepository(sessions)
     service = DeviceSyncService(
-        provider, ThingModelRepository(sessions), device_repo, StateRepository(sessions)
+        provider,
+        ThingModelRepository(sessions),
+        device_repo,
+        StateRepository(sessions),
+        RecordingAudit(),
     )
 
-    first = await service.sync()
-    second = await service.sync()
+    first = await service.sync(message_id="sync-first", trigger="test")
+    second = await service.sync(message_id="sync-second", trigger="test")
     devices = await device_repo.list_devices()
 
     assert first.discovered == second.discovered == 3
@@ -306,6 +375,39 @@ async def test_ha_provider_subscription_accepts_an_injected_fake_event_source() 
 
 
 @pytest.mark.asyncio
+async def test_ha_provider_subscription_reports_offline_without_null_brightness_error() -> None:
+    async def fake_events() -> AsyncIterator[dict[str, object]]:
+        yield {
+            "event": {
+                "data": {
+                    "entity_id": "light.desk",
+                    "new_state": {
+                        "entity_id": "light.desk",
+                        "state": "unavailable",
+                        "attributes": {"brightness": None},
+                    },
+                }
+            }
+        }
+
+    client = _client([])
+    provider = HomeAssistantDeviceProvider(client, event_source=fake_events)
+    await provider.discover()
+    received: list[ProviderEvent] = []
+    subscription = await provider.subscribe(received.append)
+
+    for _ in range(10):
+        if received:
+            break
+        await asyncio.sleep(0)
+
+    assert received[0].availability == "offline"
+    assert received[0].values == {"PowerSwitch": False}
+    await subscription.close()
+    await client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_ha_registry_resolver_groups_entities_under_one_physical_device() -> None:
     calls: list[httpx.Request] = []
     client = _client(calls, _shared_registry)
@@ -327,6 +429,73 @@ async def test_ha_registry_resolver_groups_entities_under_one_physical_device() 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("light_state", "climate_state", "expected"),
+    [
+        ("on", "unavailable", "online"),
+        ("unknown", "unavailable", "unknown"),
+        ("unavailable", "unavailable", "offline"),
+    ],
+)
+async def test_ha_provider_aggregates_physical_device_availability(
+    light_state: str,
+    climate_state: str,
+    expected: str,
+) -> None:
+    calls: list[httpx.Request] = []
+    client = _client(
+        calls,
+        _shared_registry,
+        state_overrides={
+            "light.desk": {
+                "entity_id": "light.desk",
+                "state": light_state,
+                "attributes": {},
+            },
+            "climate.living": {
+                "entity_id": "climate.living",
+                "state": climate_state,
+                "attributes": {},
+            },
+        },
+    )
+    provider = HomeAssistantDeviceProvider(client)
+
+    inventory = await provider.discover()
+    physical = next(
+        device
+        for device in inventory.devices
+        if device.external_ref == "device:physical-hub"
+    )
+
+    assert physical.state.availability == expected
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_ha_provider_normalizes_physical_device_types() -> None:
+    calls: list[httpx.Request] = []
+    client = _client(calls, _physical_type_registry)
+    provider = HomeAssistantDeviceProvider(client)
+
+    inventory = await provider.discover()
+    types = {
+        device.display_name: (
+            device.metadata["device_type"],
+            device.metadata["device_type_label"],
+        )
+        for device in inventory.devices
+    }
+
+    assert types == {
+        "电脑": ("outlet", "插座"),
+        "前门": ("lock", "门锁"),
+        "客厅设备": ("heater", "取暖器"),
+    }
+    await client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_sync_marks_a_disappeared_provider_binding_missing(tmp_path) -> None:
     calls: list[httpx.Request] = []
     client = _client(calls)
@@ -341,9 +510,12 @@ async def test_sync_marks_a_disappeared_provider_binding_missing(tmp_path) -> No
             self._inventories = [
                 initial,
                 ProviderInventory(provider_id="home_assistant", provider_type="home_assistant"),
+                initial,
             ]
 
-        async def discover(self) -> ProviderInventory:
+        async def discover(
+            self, *, message_id: str | None = None
+        ) -> ProviderInventory:
             return self._inventories.pop(0)
 
     engine = create_database_engine(f"sqlite+aiosqlite:///{tmp_path / 'iot.db'}")
@@ -355,13 +527,65 @@ async def test_sync_marks_a_disappeared_provider_binding_missing(tmp_path) -> No
         ThingModelRepository(sessions),
         device_repo,
         StateRepository(sessions),
+        RecordingAudit(),
     )
 
-    await service.sync()
-    result = await service.sync()
+    await service.sync(message_id="sync-present", trigger="test")
+    original_ids = {
+        device.display_name: device.device_id
+        for device in await device_repo.list_devices()
+    }
+    result = await service.sync(message_id="sync-missing", trigger="test")
 
     assert result.missing == 3
     assert {device.status for device in await device_repo.list_devices()} == {"missing"}
+    await service.sync(message_id="sync-restored", trigger="test")
+    restored = await device_repo.list_devices()
+    assert {device.display_name: device.device_id for device in restored} == original_ids
+    assert {device.status for device in restored} == {"active"}
+    await client.aclose()
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_failed_authoritative_sync_does_not_mark_existing_devices_missing(
+    tmp_path,
+) -> None:
+    calls: list[httpx.Request] = []
+    client = _client(calls)
+    provider = HomeAssistantDeviceProvider(client)
+    initial = await provider.discover()
+
+    class FailingSequenceProvider:
+        provider_id = provider.provider_id
+        provider_type = provider.provider_type
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def discover(self, *, message_id: str | None = None) -> ProviderInventory:
+            self.calls += 1
+            if self.calls == 1:
+                return initial
+            raise HomeAssistantTimeout("authoritative inventory timed out")
+
+    engine = create_database_engine(f"sqlite+aiosqlite:///{tmp_path / 'iot.db'}")
+    await initialize_database(engine)
+    sessions = create_session_factory(engine)
+    device_repo = DeviceRepository(sessions)
+    service = DeviceSyncService(
+        FailingSequenceProvider(),
+        ThingModelRepository(sessions),
+        device_repo,
+        StateRepository(sessions),
+        RecordingAudit(),
+    )
+
+    await service.sync(message_id="sync-present", trigger="test")
+    with pytest.raises(HomeAssistantTimeout):
+        await service.sync(message_id="sync-failed", trigger="test")
+
+    assert {device.status for device in await device_repo.list_devices()} == {"active"}
     await client.aclose()
     await engine.dispose()
 
@@ -376,10 +600,14 @@ async def test_sync_preserves_unambiguous_duplicate_feature_routes(tmp_path) -> 
     sessions = create_session_factory(engine)
     device_repo = DeviceRepository(sessions)
     service = DeviceSyncService(
-        provider, ThingModelRepository(sessions), device_repo, StateRepository(sessions)
+        provider,
+        ThingModelRepository(sessions),
+        device_repo,
+        StateRepository(sessions),
+        RecordingAudit(),
     )
 
-    await service.sync()
+    await service.sync(message_id="sync-routes", trigger="test")
     physical = next(
         device for device in await device_repo.list_devices() if device.display_name == "light.desk"
     )
@@ -416,6 +644,7 @@ async def test_grouped_locks_share_stable_model_slots_and_never_cross_route(
         "not-a-real-token",
         client=httpx.AsyncClient(transport=_grouped_lock_transport(calls)),
         registry_loader=_grouped_lock_registry,
+        audit=RecordingAudit(),
     )
     provider = HomeAssistantDeviceProvider(client)
     inventory = await provider.discover()
@@ -438,7 +667,13 @@ async def test_grouped_locks_share_stable_model_slots_and_never_cross_route(
     sessions = create_session_factory(engine)
     devices = DeviceRepository(sessions)
     models = ThingModelRepository(sessions)
-    await DeviceSyncService(provider, models, devices, StateRepository(sessions)).sync()
+    await DeviceSyncService(
+        provider,
+        models,
+        devices,
+        StateRepository(sessions),
+        RecordingAudit(),
+    ).sync(message_id="sync-locks", trigger="test")
     persisted = sorted(await devices.list_devices(), key=lambda item: item.display_name)
 
     assert persisted[0].product_id == persisted[1].product_id
@@ -497,6 +732,7 @@ async def test_ha_write_timeout_remains_indeterminate(phase: str) -> None:
             )
         ),
         registry_loader=_grouped_lock_registry,
+        audit=RecordingAudit(),
     )
     provider = HomeAssistantDeviceProvider(client)
     await provider.discover()
@@ -516,10 +752,11 @@ async def test_client_classifies_malformed_success_json_as_provider_error() -> N
             transport=httpx.MockTransport(lambda request: httpx.Response(200, content=b"not json"))
         ),
         registry_loader=_empty_registry,
+        audit=RecordingAudit(),
     )
 
     with pytest.raises(HomeAssistantError, match="invalid JSON") as error:
-        await client.get_states()
+        await client.get_states(message_id="malformed-json")
 
     assert error.value.category == "provider_error"
     await client.aclose()

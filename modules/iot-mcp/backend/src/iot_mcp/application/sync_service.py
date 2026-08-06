@@ -9,6 +9,7 @@ from iot_mcp.adapters.outbound.persistence.repositories import (
     StateRepository,
     ThingModelRepository,
 )
+from iot_mcp.audit import AuditRecorder
 from iot_mcp.domain.enums import Freshness, ModelStatus, RiskLevel
 from iot_mcp.domain.models import (
     DeviceInstance,
@@ -44,14 +45,63 @@ class DeviceSyncService:
         models: ThingModelRepository,
         devices: DeviceRepository,
         states: StateRepository,
+        audit: AuditRecorder,
     ) -> None:
         self._provider = provider
         self._models = models
         self._devices = devices
         self._states = states
+        self._audit = audit
 
-    async def sync(self) -> SyncResult:
-        inventory = await self._provider.discover()
+    async def sync(self, *, message_id: str, trigger: str) -> SyncResult:
+        await self._audit.record(
+            message_id=message_id,
+            event_type="system.request",
+            service="device_sync",
+            payload={
+                "operation": "sync",
+                "trigger": trigger,
+                "provider_id": self._provider.provider_id,
+                "provider_type": self._provider.provider_type,
+            },
+        )
+        try:
+            result = await self._sync(message_id=message_id)
+        except Exception as error:
+            await self._audit.record(
+                message_id=message_id,
+                event_type="system.response",
+                service="device_sync",
+                payload={
+                    "operation": "sync",
+                    "trigger": trigger,
+                    "provider_id": self._provider.provider_id,
+                    "error": str(error),
+                },
+                status="error",
+                error_code=getattr(error, "category", "sync_failed"),
+            )
+            raise
+        await self._audit.record(
+            message_id=message_id,
+            event_type="system.response",
+            service="device_sync",
+            payload={
+                "operation": "sync",
+                "trigger": trigger,
+                "provider_id": self._provider.provider_id,
+                "result": {
+                    "discovered": result.discovered,
+                    "upserted": result.upserted,
+                    "missing": result.missing,
+                    "snapshots": result.snapshots,
+                },
+            },
+        )
+        return result
+
+    async def _sync(self, *, message_id: str) -> SyncResult:
+        inventory = await self._provider.discover(message_id=message_id)
         seen_refs = {device.external_ref for device in inventory.devices}
         upserted = snapshots = 0
         for discovered in inventory.devices:
@@ -72,7 +122,7 @@ class DeviceSyncService:
                     display_name=discovered.display_name,
                     area=discovered.area,
                     risk_level=RiskLevel(discovered.risk_level),
-                    status="active",
+                    status=_device_status(discovered.state.availability),
                     created_at=(
                         existing.created_at if existing is not None else utc_now()
                     ),
@@ -247,6 +297,14 @@ def generated_tsl(device: ProviderDevice) -> dict[str, object]:
         "services": services,
         "events": events,
     }
+
+
+def _device_status(availability: str) -> str:
+    return {
+        "online": "active",
+        "offline": "offline",
+        "unknown": "unknown",
+    }.get(availability, "unknown")
 
 
 def inferred_data_type(

@@ -20,10 +20,16 @@ class RecordingMockProvider(MockDeviceProvider):
         self.writes: list[tuple[str, dict[str, Any]]] = []
 
     async def write_properties(
-        self, device_ref: str, values: dict[str, Any]
+        self,
+        device_ref: str,
+        values: dict[str, Any],
+        *,
+        message_id: str | None = None,
     ):
         self.writes.append((device_ref, dict(values)))
-        return await super().write_properties(device_ref, values)
+        return await super().write_properties(
+            device_ref, values, message_id=message_id
+        )
 
 
 async def _call_mcp(runtime: Any, name: str, arguments: dict[str, object]) -> dict[str, Any]:

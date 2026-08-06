@@ -17,18 +17,22 @@ from home_assist_agent.events.models import EventRequest, EventResponse
 
 @dataclass
 class FakeCommandService:
-    calls: list[tuple[str, str, str | None]] = field(default_factory=list)
+    calls: list[tuple[str, str, str | None, str | None]] = field(
+        default_factory=list
+    )
 
     async def execute(
         self,
         command: str,
         reasoning: str,
         message_id: str | None = None,
+        conversation_id: str | None = None,
     ) -> CommandResponse:
-        self.calls.append((command, reasoning, message_id))
+        self.calls.append((command, reasoning, message_id, conversation_id))
         return CommandResponse(
             message_id=message_id or "request-1",
             request_id=message_id or "request-1",
+            conversation_id=conversation_id or "conversation-current",
             category="direct_iot",
             route="home_assistant_mcp",
             status="success",
@@ -42,6 +46,25 @@ class FakeCommandService:
             ],
             elapsed_ms=25,
         )
+
+    async def current_conversation(self) -> dict[str, object]:
+        return {
+            "conversation_id": "conversation-current",
+            "status": "active",
+            "messages": [],
+        }
+
+    async def create_conversation(
+        self,
+        message_id: str | None = None,
+    ) -> dict[str, object]:
+        active_message_id = message_id or "conversation-message-1"
+        return {
+            "message_id": active_message_id,
+            "request_id": active_message_id,
+            "conversation_id": "conversation-new",
+            "status": "creating",
+        }
 
 
 class FakeHealthService:
@@ -134,7 +157,7 @@ def test_command_endpoint_trims_input_and_uses_selected_reasoning(
     assert response.status_code == 200
     assert response.json()["category"] == "direct_iot"
     assert response.json()["status"] == "success"
-    assert command_service.calls == [("打开客厅灯", "high", None)]
+    assert command_service.calls == [("打开客厅灯", "high", None, None)]
 
 
 def test_command_endpoint_defaults_to_medium_reasoning(
@@ -144,7 +167,7 @@ def test_command_endpoint_defaults_to_medium_reasoning(
     response = client.post("/api/commands", json={"command": "你好"})
 
     assert response.status_code == 200
-    assert command_service.calls == [("你好", "medium", None)]
+    assert command_service.calls == [("你好", "medium", None, None)]
 
 
 def test_command_endpoint_preserves_supplied_message_id(
@@ -159,7 +182,58 @@ def test_command_endpoint_preserves_supplied_message_id(
     assert response.status_code == 200
     assert response.json()["message_id"] == "platform-message-1"
     assert response.json()["request_id"] == "platform-message-1"
-    assert command_service.calls == [("你好", "medium", "platform-message-1")]
+    assert command_service.calls == [
+        ("你好", "medium", "platform-message-1", None)
+    ]
+
+
+def test_conversation_id_is_forwarded_and_returned(
+    client: TestClient,
+    command_service: FakeCommandService,
+) -> None:
+    response = client.post(
+        "/api/commands",
+        json={
+            "command": "继续",
+            "message_id": "message-followup",
+            "conversation_id": "conversation-current",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["conversation_id"] == "conversation-current"
+    assert command_service.calls == [
+        (
+            "继续",
+            "medium",
+            "message-followup",
+            "conversation-current",
+        )
+    ]
+
+
+def test_conversation_endpoints_hide_codex_thread_id(client: TestClient) -> None:
+    current = client.get("/api/conversations/current")
+    created = client.post(
+        "/api/conversations",
+        json={"message_id": "message-new-conversation"},
+    )
+
+    assert current.status_code == 200
+    assert current.json() == {
+        "conversation_id": "conversation-current",
+        "status": "active",
+        "messages": [],
+    }
+    assert created.status_code == 200
+    assert created.json() == {
+        "message_id": "message-new-conversation",
+        "request_id": "message-new-conversation",
+        "conversation_id": "conversation-new",
+        "status": "creating",
+    }
+    assert "codex_thread_id" not in current.text
+    assert "codex_thread_id" not in created.text
 
 
 def test_command_response_forces_request_id_to_match_message_id() -> None:

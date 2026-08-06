@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from pydantic import ValidationError
 
@@ -83,12 +84,20 @@ class ControlService:
         action: ControlAction,
         principal: TrustedPrincipal,
         idempotency_key: str,
+        message_id: str | None = None,
     ) -> ControlOperation:
+        operation_message_id = message_id or str(uuid4())
         if not idempotency_key:
             raise SafeControlError("idempotency_key_required", "Idempotency-Key is required")
         device = await self._devices.get_device(device_id)
         if device is None:
             raise SafeControlError("target_not_found", "device was not found", status_code=404)
+        if device.status != "active":
+            raise SafeControlError(
+                "device_unavailable",
+                "device is not currently available for control",
+                status_code=409,
+            )
         binding = await self._devices.get_primary_binding(device_id, device.provider_id)
         if binding is None:
             raise SafeControlError(
@@ -165,9 +174,11 @@ class ControlService:
                 ) from error
             await self._notify_confirmation_safely(confirmation, action)
             return operation
-        return await self._execute(operation)
+        return await self._execute(operation, message_id=operation_message_id)
 
-    async def execute_approved(self, operation_id: str) -> ControlOperation:
+    async def execute_approved(
+        self, operation_id: str, *, message_id: str | None = None
+    ) -> ControlOperation:
         operation = await self._operations.get_operation(operation_id)
         if operation is None:
             raise SafeControlError(
@@ -192,15 +203,29 @@ class ControlService:
         operation = await self._operations.update_operation(
             operation.operation_id, status=OperationStatus.APPROVED
         )
-        return await self._execute(operation)
+        return await self._execute(
+            operation, message_id=message_id or str(uuid4())
+        )
 
-    async def _execute(self, operation: ControlOperation) -> ControlOperation:
+    async def _execute(
+        self, operation: ControlOperation, *, message_id: str
+    ) -> ControlOperation:
         target = _operation_target(operation)
         if target is None:
             return await self._operations.update_operation(
                 operation.operation_id,
                 status=OperationStatus.REJECTED,
                 result={"code": "bound_target_missing", "retryable": False},
+            )
+        device = await self._devices.get_device(operation.device_id)
+        if device is None or device.status != "active":
+            return await self._operations.update_operation(
+                operation.operation_id,
+                status=OperationStatus.FAILED,
+                result={
+                    "code": "device_unavailable",
+                    "retryable": device is not None and device.status != "missing",
+                },
             )
         provider = self._providers.get(target.provider_id)
         if provider is None or provider.provider_type != target.provider_type:
@@ -218,7 +243,9 @@ class ControlService:
         try:
             if action.kind == "properties":
                 current = await provider.read_state(
-                    target.external_device_ref, list(action.values)
+                    target.external_device_ref,
+                    list(action.values),
+                    message_id=message_id,
                 )
                 if all(current.values.get(key) == value for key, value in action.values.items()):
                     return await self._operations.update_operation(
@@ -227,11 +254,16 @@ class ControlService:
                         result={"state": current.values},
                     )
                 result = await provider.write_properties(
-                    target.external_device_ref, action.values
+                    target.external_device_ref,
+                    action.values,
+                    message_id=message_id,
                 )
             else:
                 result = await provider.invoke_service(
-                    target.external_device_ref, action.service or "", action.inputs
+                    target.external_device_ref,
+                    action.service or "",
+                    action.inputs,
+                    message_id=message_id,
                 )
         except TimeoutError:
             return await self._operations.update_operation(

@@ -8,10 +8,11 @@
 
 仓库已经包含一个本地、无鉴权的最小 Web 产品：
 
-- React 单页工作台：输入指令，查看固定路由策略、依赖状态和执行轨迹。
-- Python/FastAPI 后端：统一提供指令与健康接口，并直接托管 React 生产构建。
+- 统一 React 控制台：同一侧栏内使用家庭指令、主流程审计、设备实例、物模型、Provider 和操作事件页面。
+- 两个独立 FastAPI 后端：主流程接口使用 `8080`，IoT MCP 接口使用 `8090`，彼此不进行后端调用。
 - 三类分发：Codex 以 `low` 判断直接控制、模糊控制或普通请求；设备目标由确定性候选集与 Codex `medium` 排序解析；模糊控制再由 `medium` 规划非目标参数；普通请求由 `high` 回答。
-- 确定性目标解析：从 HA 实时状态和实体、设备、区域注册表读取稳定 `entity_id`，合并当前用户术语后生成最多 20 个候选；Codex 只能选择候选编号，执行前会重新读取目录并确定性校验。
+- 受限语义目标解析：从 HA 实时状态和实体、设备、区域注册表读取稳定 `entity_id`，优先使用精确名称、别名和个人术语；精确匹配缺失时，从动作兼容设备生成最多 20 个语义后备候选。Codex 只能选择候选编号，执行前会重新读取目录并确定性校验。
+- 混合自治澄清：唯一高置信度目标可直接执行；多个合理目标会点名真实设备询问。用户可选择单个设备或确认“全部”，系统只控制本次展示的候选并在完整成功后学习该称呼。
 - 个人术语学习：整个实体集合执行成功后默认静默创建个人 `provisional` 术语，10 分钟无纠正自动批准；“不是这个”可撤销，“全家都这么叫”必须再确认后才共享。
 - Home Assistant MCP：设备控制分支执行前读取实时工具定义，工具名和参数都经过安全策略与 JSON Schema 校验。
 - 本地 Codex 封装：使用只读、无审批、临时会话运行，并隔离用户全局 Codex 配置。
@@ -24,6 +25,7 @@
 
 - Python 3.11+
 - Node.js/npm
+- [uv](https://docs.astral.sh/uv/)
 - 已安装并登录的 Codex CLI，可用 `codex login status` 检查
 - 启用了 MCP Server 集成的 Home Assistant
 - 一个 Home Assistant 长期访问令牌
@@ -37,23 +39,48 @@ python3 -m venv .venv
 cp .env.example .env
 # 编辑 .env，至少填写 HA_BASE_URL、HA_MCP_URL 和 HA_TOKEN
 
-cd frontend
-npm install
-npm run build
-cd ..
+cd modules/iot-mcp/backend
+uv sync --extra dev
 
-.venv/bin/python -m home_assist_agent
+cd ../web
+npm ci
+cd ../../..
+
+.venv/bin/python scripts/dev_all.py
 ```
 
-浏览器打开 `http://127.0.0.1:8080` 使用指令中心，打开 `http://127.0.0.1:8080/audit` 查看按 `message_id` 串联的审计中心。默认配置不会监听外网地址，也没有鉴权；不要把该端口直接暴露到局域网或公网。
+浏览器统一打开 `http://127.0.0.1:5173`。启动器会同时运行：
 
-开发前端时可运行 `cd frontend && npm run dev`，Vite 会把 `/api` 转发到 `127.0.0.1:8080`。
+| 进程 | 地址 | 用途 |
+| --- | --- | --- |
+| 统一前端 | `http://127.0.0.1:5173` | 本地开发入口 |
+| Home Assist Agent | `http://127.0.0.1:8080` | 指令、健康和主流程审计 API |
+| IoT MCP | `http://127.0.0.1:8090` | 设备 API、OpenAPI 和生产构建页面 |
+
+三个进程各自监听独立端口。按 `Ctrl+C` 会完整停止全部进程；任一子进程异常退出时，启动器也会清理其余子进程。运行 `.venv/bin/python scripts/dev_all.py --describe` 可只查看入口，不会输出 HA Token 或其他凭据。
+
+如果本机 `5173` 已被其他项目占用，只移动前端端口即可：`.venv/bin/python scripts/dev_all.py --frontend-port 5174`。两个后端仍固定使用 `8080` 和 `8090`。
+
+默认配置只监听本机地址，IoT Web 暂时关闭鉴权；不要把这些端口直接暴露到局域网或公网。根后端默认仅提供 API，不再托管旧 `frontend` 构建。
+
+统一前端的 Vite 会把 `/agent-api/*` 转发到 `8080/api/*`，把 `/api/v1/*` 转发到 `8090/api/v1/*`，两个后端仍互不依赖。
+
+生产构建使用：
+
+```bash
+cd modules/iot-mcp/web
+npm run build
+cd ../backend
+uv run python -m iot_mcp --mode http
+```
+
+随后从 `http://127.0.0.1:8090` 打开统一页面；主流程后端仍需在 `8080` 单独运行。
 
 ### 分发行为
 
 | 类型 | 示例 | 处理路径 |
 | --- | --- | --- |
-| 直接 IoT | `打开客厅灯`、`把客厅灯调到 30%` | Codex `low` 路由 → HA 目录与个人术语生成候选 → Codex `medium` 只选候选 → 刷新校验 → HA MCP |
+| 直接 IoT | `打开客厅灯`、`把客厅灯调到 30%` | Codex `low` 路由 → HA 目录与个人术语生成精确或语义后备候选 → Codex `medium` 选择、判歧义或拒绝 → 必要时定向澄清 → 刷新校验 → HA MCP |
 | 间接 IoT | `客厅太暗了` | Codex `low` 路由 → 候选解析与刷新校验 → Codex `medium` 只规划非目标参数 → HA MCP |
 | 其余指令 | `介绍一下你能做什么` | Codex `low` 路由 → Codex `high` 普通回答；不访问 HA |
 
@@ -88,7 +115,8 @@ TERM_DB_PATH=data/terms.db
 
 ```bash
 .venv/bin/pytest
-cd frontend && npm test -- --run
+cd modules/iot-mcp/backend && uv run pytest
+cd ../web && npm test -- --run && npm run typecheck && npm run build
 ```
 
 ## 核心定位

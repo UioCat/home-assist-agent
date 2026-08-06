@@ -36,6 +36,7 @@ async def test_manual_model_uses_draft_publish_archive_and_export_lifecycle(
     tmp_path,
 ) -> None:
     settings = Settings(
+        auth_enabled=True,
         database_url=f"sqlite+aiosqlite:///{tmp_path / 'models.db'}",
         admin_token="admin-secret",
         session_signing_secret="session-secret-with-enough-entropy",
@@ -146,6 +147,7 @@ async def test_manual_import_cannot_overwrite_system_product_identity(
     tmp_path,
 ) -> None:
     settings = Settings(
+        auth_enabled=True,
         database_url=f"sqlite+aiosqlite:///{tmp_path / 'protected.db'}",
         admin_token="admin-secret",
         session_signing_secret="session-secret-with-enough-entropy",
@@ -182,6 +184,7 @@ async def test_manual_import_cannot_overwrite_system_product_identity(
 
 async def test_device_detail_exposes_the_exact_bound_model(tmp_path) -> None:
     settings = Settings(
+        auth_enabled=True,
         database_url=f"sqlite+aiosqlite:///{tmp_path / 'device-model.db'}",
         admin_token="admin-secret",
         session_signing_secret="session-secret-with-enough-entropy",

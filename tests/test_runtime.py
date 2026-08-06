@@ -85,6 +85,7 @@ def test_settings_load_ha_connection_from_environment(monkeypatch) -> None:
     monkeypatch.setenv("AUDIT_DB_PATH", "runtime/audit.db")
     monkeypatch.setenv("EVENT_DB_PATH", "runtime/events.db")
     monkeypatch.setenv("TERM_DB_PATH", "runtime/terms.db")
+    monkeypatch.setenv("CONVERSATION_DB_PATH", "runtime/conversations.db")
     monkeypatch.setenv("HOME_ID", "home-1")
     monkeypatch.setenv("PERSON_ID", "person-1")
     monkeypatch.setenv("TARGET_RESOLUTION_ENABLED", "true")
@@ -102,6 +103,7 @@ def test_settings_load_ha_connection_from_environment(monkeypatch) -> None:
     assert settings.audit_db_path == Path("runtime/audit.db")
     assert settings.event_db_path == Path("runtime/events.db")
     assert settings.term_db_path == Path("runtime/terms.db")
+    assert settings.conversation_db_path == Path("runtime/conversations.db")
     assert settings.home_id == "home-1"
     assert settings.person_id == "person-1"
     assert settings.target_resolution_enabled is True
@@ -118,16 +120,22 @@ def test_default_runtime_builds_without_ha_credentials(tmp_path: Path) -> None:
         audit_db_path=tmp_path / "audit.db",
         event_db_path=tmp_path / "events.db",
         term_db_path=tmp_path / "terms.db",
+        conversation_db_path=tmp_path / "conversations.db",
     )
 
     app = build_app(settings)
 
     route_paths = {route.path for route in app.routes}
     assert "/api/commands" in route_paths
+    assert "/api/conversations/current" in route_paths
+    assert "/api/conversations" in route_paths
     assert "/api/events" in route_paths
     assert "/api/health" in route_paths
     assert app.state.target_resolution_enabled is True
     assert app.state.term_promotion_worker is not None
+    current = TestClient(app).get("/api/conversations/current")
+    assert current.status_code == 200
+    assert current.json()["messages"] == []
 
 
 def test_runtime_feature_flag_off_keeps_compatibility_path(
@@ -147,6 +155,60 @@ def test_runtime_feature_flag_off_keeps_compatibility_path(
 
     assert app.state.target_resolution_enabled is False
     assert app.state.term_promotion_worker is None
+
+
+def test_runtime_allows_only_the_configured_unified_frontend_origin(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings(
+        _env_file=None,
+        ha_token=None,
+        target_resolution_enabled=False,
+        frontend_dist=tmp_path / "missing-dist",
+        audit_db_path=tmp_path / "audit.db",
+        event_db_path=tmp_path / "events.db",
+        term_db_path=tmp_path / "terms.db",
+        cors_origins=["http://127.0.0.1:8090"],
+    )
+    client = TestClient(build_app(settings))
+
+    allowed = client.options(
+        "/api/health",
+        headers={
+            "Origin": "http://127.0.0.1:8090",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    blocked = client.options(
+        "/api/health",
+        headers={
+            "Origin": "https://example.invalid",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+
+    assert allowed.status_code == 200
+    assert allowed.headers.get("access-control-allow-origin") == (
+        "http://127.0.0.1:8090"
+    )
+    assert blocked.headers.get("access-control-allow-origin") is None
+
+
+def test_runtime_is_api_only_when_no_legacy_frontend_is_configured(
+    tmp_path: Path,
+) -> None:
+    settings = AppSettings(
+        _env_file=None,
+        ha_token=None,
+        target_resolution_enabled=False,
+        audit_db_path=tmp_path / "audit.db",
+        event_db_path=tmp_path / "events.db",
+        term_db_path=tmp_path / "terms.db",
+    )
+
+    response = TestClient(build_app(settings)).get("/")
+
+    assert response.status_code == 404
 
 
 def test_runtime_serves_built_frontend(tmp_path: Path) -> None:

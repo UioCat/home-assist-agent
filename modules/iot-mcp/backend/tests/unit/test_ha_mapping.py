@@ -5,6 +5,7 @@ from iot_mcp.adapters.outbound.home_assistant.mapping import (
     ha_brightness_to_percent,
     map_ha_state,
     percent_to_ha_brightness,
+    properties_from_state,
     service_for_properties,
 )
 
@@ -15,6 +16,32 @@ def test_brightness_conversion_preserves_boundaries_and_round_trips() -> None:
     assert percent_to_ha_brightness(0) == 0
     assert percent_to_ha_brightness(100) == 255
     assert ha_brightness_to_percent(percent_to_ha_brightness(50)) == 50
+
+
+def test_off_light_ignores_null_brightness_and_keeps_power_state() -> None:
+    values = properties_from_state(
+        {
+            "entity_id": "light.desk",
+            "state": "off",
+            "attributes": {"brightness": None},
+        }
+    )
+
+    assert values == {"PowerSwitch": False}
+
+
+@pytest.mark.parametrize(
+    ("raw_state", "expected"),
+    [("off", "online"), ("unavailable", "offline"), ("unknown", "unknown")],
+)
+def test_ha_state_keeps_availability_separate_from_power(
+    raw_state: str, expected: str
+) -> None:
+    mapped = map_ha_state(
+        {"entity_id": "switch.desk", "state": raw_state, "attributes": {}}
+    )
+
+    assert mapped.state.availability == expected
 
 
 def test_capability_fingerprint_excludes_display_name_and_entity_id() -> None:

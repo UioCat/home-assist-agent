@@ -9,6 +9,7 @@ from mcp.server.fastmcp import FastMCP
 
 from iot_mcp.adapters.inbound.http.app import create_app
 from iot_mcp.adapters.inbound.mcp.server import create_mcp_server
+from iot_mcp.audit import AuditRecorder
 from iot_mcp.bootstrap.container import ApplicationContainer, create_container
 from iot_mcp.config.settings import Settings
 from iot_mcp.ports.device_provider import DeviceProvider
@@ -44,5 +45,6 @@ def build_runtime(
     settings: Settings | None = None,
     *,
     providers: dict[str, DeviceProvider] | None = None,
+    audit: AuditRecorder | None = None,
 ) -> Runtime:
-    return Runtime(create_container(settings, providers=providers))
+    return Runtime(create_container(settings, providers=providers, audit=audit))

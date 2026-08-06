@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -14,6 +16,7 @@ from iot_mcp.domain.models import DeviceInstance, ProviderDeviceBinding
 @pytest.fixture
 def settings(tmp_path):
     return Settings(
+        auth_enabled=True,
         database_url=f"sqlite+aiosqlite:///{tmp_path / 'api.db'}",
         admin_token="admin-secret",
         machine_tokens={"machine-secret": "agent"},
@@ -22,6 +25,29 @@ def settings(tmp_path):
         allowed_confirmation_actors={"owner"},
         secure_cookies=True,
     )
+
+
+def test_authentication_is_disabled_by_default() -> None:
+    assert Settings().auth_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_disabled_auth_emits_one_warning_for_the_started_app(settings, caplog) -> None:
+    disabled = settings.model_copy(update={"auth_enabled": False})
+
+    with caplog.at_level(logging.WARNING):
+        create_app(settings=disabled, providers={"mock": MockDeviceProvider()})
+        app = create_app(settings=disabled, providers={"mock": MockDeviceProvider()})
+        async with app.router.lifespan_context(app):
+            pass
+
+    warnings = [
+        message for message in caplog.messages if "authentication is disabled" in message
+    ]
+    assert warnings == [
+        "IoT MCP HTTP authentication is disabled; use local development only"
+    ]
+    assert "admin-secret" not in caplog.text
 
 
 async def _client(settings):
@@ -47,6 +73,78 @@ async def _client(settings):
             transport=ASGITransport(app=app), base_url="https://testserver"
         ) as client:
             yield app, client
+
+
+@pytest.mark.asyncio
+async def test_disabled_auth_bootstraps_and_controls_without_credentials(settings) -> None:
+    disabled = settings.model_copy(update={"auth_enabled": False})
+    async for app, client in _client(disabled):
+        session = await client.get("/api/v1/auth/session")
+        devices = await client.get(
+            "/api/v1/devices",
+            headers={"Authorization": "Bearer stale-browser-token"},
+        )
+        write = await client.post(
+            "/api/v1/devices/door/properties:write",
+            headers={"Idempotency-Key": "auth-disabled-write"},
+            json={"values": {"LockState": "UNLOCK"}},
+        )
+
+        assert session.status_code == 200
+        assert session.json() == {
+            "auth_enabled": False,
+            "csrf_token": None,
+            "expires_at": None,
+        }
+        assert devices.status_code == 200
+        assert write.status_code == 200
+        assert write.json()["status"] == "succeeded"
+        operation = await app.state.operations.get_operation(write.json()["operation_id"])
+        assert operation is not None
+        assert operation.initiator == "web_session:owner"
+        assert await app.state.confirmations.get_by_operation(operation.operation_id) is None
+
+
+@pytest.mark.asyncio
+async def test_device_cards_aggregate_normalized_provider_state_and_keep_partial_devices(
+    settings,
+) -> None:
+    disabled = settings.model_copy(update={"auth_enabled": False})
+    async for _, client in _client(disabled):
+        response = await client.get("/api/v1/device-cards")
+
+        assert response.status_code == 200
+        cards = response.json()
+        assert len(cards) == 4
+
+        light = next(card for card in cards if card["display_name"] == "Desk light")
+        assert light["provider_id"] == "mock"
+        assert light["provider_type"] == "mock"
+        assert light["provider_status"] == "healthy"
+        assert light["values"] == {"Brightness": 50, "PowerSwitch": True}
+        assert light["primary_control"] == {
+            "kind": "property",
+            "identifier": "PowerSwitch",
+            "name": "PowerSwitch",
+            "data_type": {"type": "bool", "specs": {}},
+            "current_value": True,
+            "risk_level": "low",
+        }
+        assert light["secondary_status"] == [
+            {
+                "identifier": "Brightness",
+                "name": "Brightness",
+                "value": 50,
+                "unit": None,
+            }
+        ]
+
+        partial = next(card for card in cards if card["device_id"] == "door")
+        assert partial["provider_type"] == "mock"
+        assert partial["freshness"] == "unknown"
+        assert partial["values"] == {}
+        assert partial["primary_control"] is None
+        assert partial["secondary_status"] == []
 
 
 @pytest.mark.asyncio
@@ -116,6 +214,8 @@ async def test_signed_session_and_bound_csrf_execute_human_high_risk(settings) -
         assert "HttpOnly" in login.headers["set-cookie"]
         assert "Secure" in login.headers["set-cookie"]
         assert "samesite=strict" in login.headers["set-cookie"].lower()
+        assert login.json()["auth_enabled"] is True
+        assert login.json()["expires_at"].endswith("+00:00")
         csrf = login.json()["csrf_token"]
 
         missing_csrf = await client.post(
@@ -150,6 +250,7 @@ async def test_signed_session_bootstrap_restores_bound_csrf_without_renewal(
         restored = await client.get("/api/v1/auth/session")
 
         assert restored.status_code == 200
+        assert restored.json()["auth_enabled"] is True
         assert restored.json()["csrf_token"] == login.json()["csrf_token"]
         assert restored.json()["expires_at"].endswith("+00:00")
         assert "set-cookie" not in restored.headers
@@ -178,9 +279,13 @@ async def test_expired_session_bootstrap_returns_stable_non_leaking_error(settin
         assert set(response.json()["error"]) == {
             "code",
             "message",
+            "message_id",
             "retryable",
             "request_id",
         }
+        assert response.json()["error"]["message_id"] == response.json()["error"][
+            "request_id"
+        ]
         assert expired not in response.text
 
 
@@ -389,7 +494,14 @@ async def test_error_shape_is_stable_and_does_not_echo_secret(settings) -> None:
         body = response.json()
 
         assert response.status_code == 401
-        assert set(body["error"]) == {"code", "message", "retryable", "request_id"}
+        assert set(body["error"]) == {
+            "code",
+            "message",
+            "message_id",
+            "retryable",
+            "request_id",
+        }
+        assert body["error"]["message_id"] == body["error"]["request_id"]
         assert "wrong-secret" not in response.text
 
 
@@ -404,8 +516,12 @@ async def test_router_404_and_405_use_stable_error_contract(settings) -> None:
         assert set(missing.json()["error"]) == {
             "code",
             "message",
+            "message_id",
             "retryable",
             "request_id",
         }
+        assert missing.json()["error"]["message_id"] == missing.json()["error"][
+            "request_id"
+        ]
         assert wrong_method.status_code == 405
         assert wrong_method.json()["error"]["code"] == "method_not_allowed"

@@ -289,6 +289,10 @@ pre,
   background: var(--online-green);
 }
 
+.sidebar__health--offline .sidebar__health-dot {
+  background: var(--danger-red);
+}
+
 .mobile-header {
   display: none;
 }

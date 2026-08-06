@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -9,15 +11,18 @@ from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from iot_mcp.adapters.inbound.http.routes import router
 from iot_mcp.application.policy import SafeControlError
+from iot_mcp.audit import AuditUnavailableError
 from iot_mcp.bootstrap.container import ApplicationContainer, create_container
 from iot_mcp.config.settings import Settings
 from iot_mcp.ports.device_provider import DeviceProvider
+
+logger = logging.getLogger(__name__)
 
 
 def create_app(
@@ -33,6 +38,10 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        if not settings.auth_enabled:
+            logger.warning(
+                "IoT MCP HTTP authentication is disabled; use local development only"
+            )
         await container.startup()
         try:
             yield
@@ -50,17 +59,69 @@ def create_app(
     app.state.confirmations = container.confirmations
     app.state.webhook_nonces = container.webhook_nonces
     app.state.webhook_channel = container.webhook_channel
+    app.state.audit = container.audit
     app.state.control = container.control
     app.state.confirmation_service = container.confirmation_service
     app.state.queries = container.queries
     app.state.provider_status = container.provider_status
 
     @app.middleware("http")
-    async def request_id_middleware(request: Request, call_next: Any):
-        request.state.request_id = str(uuid4())
+    async def audit_message_middleware(request: Request, call_next: Any):
+        message_id = str(uuid4())
+        request.state.message_id = message_id
+        request.state.request_id = message_id
+        if not request.url.path.startswith("/api/"):
+            response = await call_next(request)
+            _set_message_headers(response, message_id)
+            return response
+
+        raw_request = await request.body()
+        try:
+            await container.audit.record(
+                message_id=message_id,
+                event_type="user.request",
+                service="http_api",
+                payload={
+                    "method": request.method,
+                    "path": request.url.path,
+                    "query": request.url.query,
+                    "body": _decode_body(raw_request),
+                },
+            )
+        except AuditUnavailableError:
+            return _audit_unavailable_response(message_id)
+
         response = await call_next(request)
-        response.headers["X-Request-ID"] = request.state.request_id
-        return response
+        raw_response = b"".join(
+            [chunk async for chunk in response.body_iterator]
+        )
+        try:
+            await container.audit.record(
+                message_id=message_id,
+                event_type="user.response",
+                service="http_api",
+                payload={
+                    "status_code": response.status_code,
+                    "body": _decode_body(raw_response),
+                },
+                status="error" if response.status_code >= 400 else "success",
+                error_code=(
+                    _response_error_code(raw_response)
+                    if response.status_code >= 400
+                    else None
+                ),
+            )
+        except AuditUnavailableError:
+            return _audit_unavailable_response(message_id)
+        rebuilt = Response(
+            content=raw_response,
+            status_code=response.status_code,
+            headers=dict(response.headers),
+            media_type=response.media_type,
+            background=response.background,
+        )
+        _set_message_headers(rebuilt, message_id)
+        return rebuilt
 
     @app.exception_handler(SafeControlError)
     async def safe_control_error_handler(
@@ -148,7 +209,7 @@ def _error_response(
     message: str,
     retryable: bool,
 ) -> JSONResponse:
-    request_id = getattr(request.state, "request_id", str(uuid4()))
+    message_id = getattr(request.state, "message_id", str(uuid4()))
     return JSONResponse(
         status_code=status_code,
         content={
@@ -156,10 +217,52 @@ def _error_response(
                 "code": code,
                 "message": message,
                 "retryable": retryable,
-                "request_id": request_id,
+                "message_id": message_id,
+                "request_id": message_id,
             }
         },
-        headers={"X-Request-ID": request_id},
+        headers={"X-Message-ID": message_id, "X-Request-ID": message_id},
+    )
+
+
+def _decode_body(body: bytes) -> Any:
+    if not body:
+        return None
+    try:
+        return json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return body.decode("utf-8", errors="replace")
+
+
+def _response_error_code(body: bytes) -> str | None:
+    decoded = _decode_body(body)
+    if not isinstance(decoded, dict):
+        return None
+    error = decoded.get("error")
+    if not isinstance(error, dict):
+        return None
+    code = error.get("code")
+    return str(code) if code is not None else None
+
+
+def _set_message_headers(response: Response, message_id: str) -> None:
+    response.headers["X-Message-ID"] = message_id
+    response.headers["X-Request-ID"] = message_id
+
+
+def _audit_unavailable_response(message_id: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": {
+                "code": "audit_unavailable",
+                "message": "audit persistence is unavailable",
+                "retryable": True,
+                "message_id": message_id,
+                "request_id": message_id,
+            }
+        },
+        headers={"X-Message-ID": message_id, "X-Request-ID": message_id},
     )
 
 

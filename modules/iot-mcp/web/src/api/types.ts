@@ -116,6 +116,56 @@ export interface DeviceState {
   values: Record<string, unknown>;
   observed_at: string;
   freshness: Freshness;
+  availability: DeviceAvailability;
+}
+
+export type DeviceAvailability = "online" | "offline" | "unknown";
+
+export type DeviceType =
+  | "light"
+  | "outlet"
+  | "climate"
+  | "heater"
+  | "humidifier"
+  | "lock"
+  | "appliance"
+  | "switch"
+  | "other";
+
+export interface DeviceCardPrimaryControl {
+  kind: "property";
+  identifier: string;
+  name: string;
+  data_type: TslDataType;
+  current_value: unknown;
+  risk_level: RiskLevel;
+}
+
+export interface DeviceCardSecondaryStatus {
+  identifier: string;
+  name: string;
+  value: unknown;
+  unit: string | null;
+}
+
+export interface DeviceCard {
+  device_id: string;
+  display_name: string;
+  area: string | null;
+  device_type: DeviceType;
+  device_type_label: string;
+  availability: DeviceAvailability;
+  provider_id: string;
+  provider_type: string;
+  device_status: string;
+  provider_status: string;
+  risk_level: RiskLevel;
+  observed_at: string | null;
+  freshness: Freshness;
+  values: Record<string, unknown>;
+  primary_control: DeviceCardPrimaryControl | null;
+  secondary_status: DeviceCardSecondaryStatus[];
+  capability_count: number;
 }
 
 export interface OperationResult {
@@ -159,8 +209,9 @@ export interface ConfirmationItem {
 }
 
 export interface SessionInfo {
-  csrf_token: string;
-  expires_at: string;
+  auth_enabled: boolean;
+  csrf_token: string | null;
+  expires_at: string | null;
 }
 
 export interface DeviceEvent {
@@ -207,6 +258,7 @@ export interface IoTApi {
   archiveThingModel(modelId: string): Promise<ThingModelVersion>;
   exportThingModel(modelId: string): Promise<TslDocument>;
   listDevices(): Promise<Device[]>;
+  listDeviceCards(): Promise<DeviceCard[]>;
   getDevice(deviceId: string): Promise<DeviceDetail>;
   getDeviceState(deviceId: string): Promise<DeviceState>;
   writeProperties(deviceId: string, values: Record<string, unknown>): Promise<OperationResult>;

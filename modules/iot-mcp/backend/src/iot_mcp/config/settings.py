@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="IOT_MCP_", env_file=".env", extra="ignore")
 
     database_url: str = "sqlite+aiosqlite:///./iot_mcp.db"
+    audit_database_path: str = "./iot_mcp_audit.db"
     sqlite_echo: bool = False
     server_host: str = "127.0.0.1"
     server_port: int = Field(default=8090, ge=1, le=65535)
@@ -23,6 +24,7 @@ class Settings(BaseSettings):
     home_assistant_timeout_seconds: float = Field(default=10, gt=0)
     reconcile_interval_seconds: float = Field(default=600, gt=0)
     provider_reconnect_delay_seconds: float = Field(default=1, gt=0)
+    auth_enabled: bool = False
     admin_token: str = ""
     machine_tokens: dict[str, str] = Field(default_factory=dict)
     session_signing_secret: str = Field(default_factory=lambda: secrets.token_urlsafe(32))

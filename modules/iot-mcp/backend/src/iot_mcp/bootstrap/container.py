@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from dataclasses import dataclass, field
+from uuid import uuid4
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -29,6 +30,7 @@ from iot_mcp.application.confirmation_service import ConfirmationService
 from iot_mcp.application.control_service import ControlService
 from iot_mcp.application.query_service import QueryService
 from iot_mcp.application.sync_service import DeviceSyncService
+from iot_mcp.audit import AuditRecorder, SQLiteAuditRecorder
 from iot_mcp.config.settings import Settings
 from iot_mcp.domain.enums import Freshness
 from iot_mcp.domain.models import DeviceEvent, PropertySnapshot
@@ -52,6 +54,7 @@ class ApplicationContainer:
     confirmations: ConfirmationRepository
     webhook_nonces: WebhookNonceRepository
     webhook_channel: SignedWebhookMessageChannel
+    audit: AuditRecorder
     control: ControlService
     confirmation_service: ConfirmationService
     queries: QueryService
@@ -69,7 +72,14 @@ class ApplicationContainer:
         await initialize_database(self.engine)
         for provider_id, provider in self.providers.items():
             try:
-                await DeviceSyncService(provider, self.models, self.devices, self.states).sync()
+                message_id = str(uuid4())
+                await DeviceSyncService(
+                    provider,
+                    self.models,
+                    self.devices,
+                    self.states,
+                    self.audit,
+                ).sync(message_id=message_id, trigger="startup")
             except Exception:
                 # A failed sync is explicitly degraded; no inventory or state is invented.
                 self.provider_status[provider_id] = "degraded"
@@ -123,7 +133,8 @@ class ApplicationContainer:
                 subscription = await provider.subscribe(
                     lambda event: self._persist_provider_event(
                         provider_id, provider, event
-                    )
+                    ),
+                    message_id=str(uuid4()),
                 )
                 self._subscriptions[provider_id] = subscription
                 if self._last_sync_success.get(provider_id):
@@ -173,7 +184,8 @@ class ApplicationContainer:
                         self.models,
                         self.devices,
                         self.states,
-                    ).sync()
+                        self.audit,
+                    ).sync(message_id=str(uuid4()), trigger="reconcile")
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -189,34 +201,86 @@ class ApplicationContainer:
         provider: DeviceProvider,
         event: ProviderEvent,
     ) -> None:
-        binding = await self.devices.get_binding_by_provider_ref(
-            provider_id,
-            provider.provider_type,
-            event.device_ref,
+        await self.audit.record(
+            message_id=event.message_id,
+            event_type="system.request",
+            service="provider_event",
+            payload={
+                "provider_id": provider_id,
+                "provider_type": provider.provider_type,
+                "device_ref": event.device_ref,
+                "identifier": event.identifier,
+                "values": event.values,
+                "availability": event.availability,
+                "occurred_at": event.occurred_at,
+            },
         )
-        if binding is None:
-            self.provider_status[provider_id] = "degraded"
-            return
-        for identifier, value in event.values.items():
-            await self.states.add_snapshot(
-                PropertySnapshot(
+        try:
+            binding = await self.devices.get_binding_by_provider_ref(
+                provider_id,
+                provider.provider_type,
+                event.device_ref,
+            )
+            if binding is None:
+                await self.audit.record(
+                    message_id=event.message_id,
+                    event_type="system.response",
+                    service="provider_event",
+                    payload={
+                        "persisted": False,
+                        "ignored": True,
+                        "reason": "binding_not_found",
+                    },
+                )
+                return
+            for identifier, value in event.values.items():
+                await self.states.add_snapshot(
+                    PropertySnapshot(
+                        device_id=binding.device_id,
+                        identifier=identifier,
+                        value=value,
+                        observed_at=event.occurred_at,
+                        source=provider.provider_type,
+                        freshness=Freshness.FRESH,
+                    )
+                )
+            await self.states.add_event(
+                DeviceEvent(
                     device_id=binding.device_id,
-                    identifier=identifier,
-                    value=value,
-                    observed_at=event.occurred_at,
+                    identifier=event.identifier,
+                    type="info",
+                    output_data=event.values,
+                    occurred_at=event.occurred_at,
                     source=provider.provider_type,
-                    freshness=Freshness.FRESH,
                 )
             )
-        await self.states.add_event(
-            DeviceEvent(
-                device_id=binding.device_id,
-                identifier=event.identifier,
-                type="info",
-                output_data=event.values,
-                occurred_at=event.occurred_at,
-                source=provider.provider_type,
+            device = await self.devices.get_device(binding.device_id)
+            if device is not None and device.status != "missing":
+                status = {
+                    "online": "active",
+                    "offline": "offline",
+                    "unknown": "unknown",
+                }[event.availability]
+                await self.devices.upsert_device(
+                    device.model_copy(
+                        update={"status": status, "updated_at": event.occurred_at}
+                    )
+                )
+        except Exception as error:
+            await self.audit.record(
+                message_id=event.message_id,
+                event_type="system.response",
+                service="provider_event",
+                payload={"persisted": False, "error": str(error)},
+                status="error",
+                error_code="persistence_error",
             )
+            raise
+        await self.audit.record(
+            message_id=event.message_id,
+            event_type="system.response",
+            service="provider_event",
+            payload={"persisted": True, "device_id": binding.device_id},
         )
 
 
@@ -224,14 +288,20 @@ def create_container(
     settings: Settings | None = None,
     *,
     providers: dict[str, DeviceProvider] | None = None,
+    audit: AuditRecorder | None = None,
 ) -> ApplicationContainer:
     settings = settings or Settings()
-    resolved_providers = providers if providers is not None else _providers_from_settings(settings)
+    audit = audit or SQLiteAuditRecorder(settings.audit_database_path)
+    resolved_providers = (
+        providers if providers is not None else _providers_from_settings(settings, audit)
+    )
     engine = create_database_engine(settings.database_url, echo=settings.sqlite_echo)
     sessions = create_session_factory(engine)
     models = ThingModelRepository(sessions)
     devices = DeviceRepository(sessions)
+    states = StateRepository(sessions)
     operations = OperationRepository(sessions)
+    provider_status: dict[str, str] = {}
     confirmations = ConfirmationRepository(sessions)
     webhook_nonces = WebhookNonceRepository(sessions)
     webhook_channel = SignedWebhookMessageChannel(
@@ -265,23 +335,29 @@ def create_container(
         providers=resolved_providers,
         models=models,
         devices=devices,
-        states=StateRepository(sessions),
+        states=states,
         operations=operations,
         confirmations=confirmations,
         webhook_nonces=webhook_nonces,
         webhook_channel=webhook_channel,
+        audit=audit,
         control=control,
         confirmation_service=confirmation_service,
+        provider_status=provider_status,
         queries=QueryService(
             models=models,
             devices=devices,
+            states=states,
             operations=operations,
             providers=resolved_providers,
+            provider_status=provider_status,
         ),
     )
 
 
-def _providers_from_settings(settings: Settings) -> dict[str, DeviceProvider]:
+def _providers_from_settings(
+    settings: Settings, audit: AuditRecorder
+) -> dict[str, DeviceProvider]:
     providers: dict[str, DeviceProvider] = {}
     if settings.mock_provider_enabled:
         providers[MockDeviceProvider.provider_id] = MockDeviceProvider()
@@ -290,6 +366,7 @@ def _providers_from_settings(settings: Settings) -> dict[str, DeviceProvider]:
             settings.home_assistant_url,
             settings.home_assistant_token,
             timeout_seconds=settings.home_assistant_timeout_seconds,
+            audit=audit,
         )
         providers[HomeAssistantDeviceProvider.provider_id] = HomeAssistantDeviceProvider(client)
     if not providers:

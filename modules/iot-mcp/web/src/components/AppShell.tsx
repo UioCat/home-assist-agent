@@ -4,22 +4,31 @@ import { NavLink, Outlet } from "react-router-dom";
 import { consolePath } from "./routing";
 
 const navigation = [
-  { to: "/", label: "概览", mark: "01" },
-  { to: "/thing-models", label: "物模型", mark: "02" },
-  { to: "/devices", label: "设备实例", mark: "03" },
-  { to: "/operations", label: "操作与确认", mark: "04" },
-  { to: "/events", label: "设备事件", mark: "05" },
-  { to: "/providers", label: "Provider", mark: "06" },
-  { to: "/message-channels", label: "消息通道", mark: "07" },
+  { to: "/", label: "家庭指令中心", mark: "01" },
+  { to: "/audit", label: "审计中心", mark: "02" },
+  { to: "/overview", label: "家庭概览", mark: "03" },
+  { to: "/devices", label: "设备", mark: "04" },
+  { to: "/thing-models", label: "设备能力", mark: "05" },
+  { to: "/operations", label: "待确认与记录", mark: "06" },
+  { to: "/events", label: "设备动态", mark: "07" },
+  { to: "/providers", label: "设备来源", mark: "08" },
+  { to: "/message-channels", label: "通知渠道", mark: "09" },
 ];
 
-export function AppShell({ demo }: { demo: boolean }) {
+export function AppShell({
+  demo,
+  iotUnavailable = false,
+}: {
+  demo: boolean;
+  authEnabled?: boolean;
+  iotUnavailable?: boolean;
+}) {
   const [open, setOpen] = useState(false);
   return (
     <div className="app-shell">
       <a className="skip-link" href="#main-content">跳到主要内容</a>
       <header className="mobile-header">
-        <span className="brand"><span className="brand__signal" />居家控制平面</span>
+        <span className="brand"><span className="brand__signal" />家庭控制台</span>
         <button
           className="nav-toggle"
           type="button"
@@ -33,7 +42,7 @@ export function AppShell({ demo }: { demo: boolean }) {
       <aside className={`sidebar${open ? " sidebar--open" : ""}`}>
         <div className="sidebar__brand">
           <span className="brand__signal" aria-hidden="true" />
-          <div><strong>居家控制平面</strong><span>IoT MCP / OWNER</span></div>
+          <div><strong>家庭控制台</strong><span>家庭设备与自动化</span></div>
         </div>
         {demo ? (
           <div className="demo-banner" role="status">
@@ -55,9 +64,20 @@ export function AppShell({ demo }: { demo: boolean }) {
             </NavLink>
           ))}
         </nav>
-        <div className="sidebar__health">
+        <div className={`sidebar__health${iotUnavailable ? " sidebar__health--offline" : ""}`}>
           <span className="sidebar__health-dot" aria-hidden="true" />
-          <div><strong>Session 已连接</strong><span>Cookie + CSRF</span></div>
+          <div>
+            <strong>
+              {iotUnavailable
+                ? "设备服务未连接"
+                : "家庭服务正常"}
+            </strong>
+            <span>
+              {iotUnavailable
+                ? "设备控制暂不可用"
+                : "设备控制可用"}
+            </span>
+          </div>
         </div>
       </aside>
       <main id="main-content" tabIndex={-1}>

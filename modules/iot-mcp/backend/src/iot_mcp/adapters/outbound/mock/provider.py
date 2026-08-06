@@ -52,10 +52,10 @@ class MockDeviceProvider:
             "mock:lock:front_door": {"LockState": "LOCK"},
         }
 
-    async def health(self) -> ProviderHealth:
+    async def health(self, *, message_id: str | None = None) -> ProviderHealth:
         return ProviderHealth(status="healthy")
 
-    async def discover(self) -> ProviderInventory:
+    async def discover(self, *, message_id: str | None = None) -> ProviderInventory:
         devices = [
             self._device("mock:light:desk", "Desk light", "mock-light", "Mock dimmable light"),
             self._device(
@@ -80,11 +80,29 @@ class MockDeviceProvider:
             product_name=product_name,
             state=DeviceState(device_ref=ref, values=dict(self._states[ref])),
             feature_bindings=_mock_bindings(ref),
-            metadata={"mock": True},
+            metadata={
+                "mock": True,
+                "device_type": {
+                    "mock:light:desk": "light",
+                    "mock:climate:living_room": "climate",
+                    "mock:lock:front_door": "lock",
+                }[ref],
+                "device_type_label": {
+                    "mock:light:desk": "灯具",
+                    "mock:climate:living_room": "温控",
+                    "mock:lock:front_door": "门锁",
+                }[ref],
+            },
             risk_level=risk_level,
         )
 
-    async def read_state(self, device_ref: str, selectors: list[str] | None = None) -> DeviceState:
+    async def read_state(
+        self,
+        device_ref: str,
+        selectors: list[str] | None = None,
+        *,
+        message_id: str | None = None,
+    ) -> DeviceState:
         if device_ref not in self._states:
             return DeviceState(device_ref=device_ref, values={}, freshness="unknown")
         values = self._states[device_ref]
@@ -92,7 +110,13 @@ class MockDeviceProvider:
             values = {key: value for key, value in values.items() if key in selectors}
         return DeviceState(device_ref=device_ref, values=dict(values))
 
-    async def write_properties(self, device_ref: str, values: dict[str, Any]) -> ProviderResult:
+    async def write_properties(
+        self,
+        device_ref: str,
+        values: dict[str, Any],
+        *,
+        message_id: str | None = None,
+    ) -> ProviderResult:
         if "write_properties" in self._fail_operations:
             return ProviderResult(
                 ok=False, error_code="injected_failure", message="write_properties"
@@ -104,7 +128,12 @@ class MockDeviceProvider:
         return ProviderResult(ok=True, data={"after": dict(self._states[device_ref])})
 
     async def invoke_service(
-        self, device_ref: str, service: str, inputs: dict[str, Any]
+        self,
+        device_ref: str,
+        service: str,
+        inputs: dict[str, Any],
+        *,
+        message_id: str | None = None,
     ) -> ProviderResult:
         if "invoke_service" in self._fail_operations:
             return ProviderResult(ok=False, error_code="injected_failure", message="invoke_service")
@@ -144,7 +173,9 @@ class MockDeviceProvider:
         await self._emit(device_ref, "state_changed", after)
         return ProviderResult(ok=True, data={"before": before, "after": after})
 
-    async def subscribe(self, sink: EventSink) -> Subscription:
+    async def subscribe(
+        self, sink: EventSink, *, message_id: str | None = None
+    ) -> Subscription:
         self._sinks.append(sink)
         return _MockSubscription(self, sink)
 

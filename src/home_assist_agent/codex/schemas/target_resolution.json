@@ -30,7 +30,6 @@
     "alternative_candidate_ids": {
       "type": "array",
       "maxItems": 3,
-      "uniqueItems": true,
       "items": {
         "type": "string",
         "pattern": "^cand_[0-9]{2}$"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+from uuid import uuid4
 
 from iot_mcp.adapters.outbound.persistence.repositories import (
     ConfirmationRepository,
@@ -46,6 +47,7 @@ class ConfirmationService:
         decision: str,
         actor: str,
         action_hash: str,
+        message_id: str | None = None,
     ) -> ControlOperation:
         confirmation = await self._confirmations.get_request(confirmation_id)
         if confirmation is None:
@@ -122,7 +124,9 @@ class ConfirmationService:
                 "confirmation was already decided",
                 status_code=409,
             )
-        return await self._control.execute_approved(operation.operation_id)
+        return await self._control.execute_approved(
+            operation.operation_id, message_id=message_id or str(uuid4())
+        )
 
     async def _reject_bound_operation(
         self, confirmation_id: str, operation: ControlOperation, *, code: str

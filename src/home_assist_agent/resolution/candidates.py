@@ -1,5 +1,6 @@
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 
 from home_assist_agent.resolution.models import (
     ActorContext,
@@ -22,6 +23,11 @@ _SOURCE_WEIGHTS = {
     "ha_name": 350.0,
     "area": 250.0,
     "context": 100.0,
+    "semantic_fallback": 50.0,
+}
+
+_DOMAIN_HINTS = {
+    "light": ("灯", "灯光", "照明"),
 }
 
 
@@ -31,10 +37,14 @@ class _CandidateEvidence:
     sources: set[str] = field(default_factory=set)
     matched_terms: set[str] = field(default_factory=set)
     evidence: set[str] = field(default_factory=set)
+    semantic_score: float = 0
 
     @property
     def score(self) -> float:
-        return sum(_SOURCE_WEIGHTS[source] for source in self.sources)
+        return (
+            sum(_SOURCE_WEIGHTS[source] for source in self.sources)
+            + self.semantic_score
+        )
 
 
 class CandidateBuilder:
@@ -143,6 +153,30 @@ class CandidateBuilder:
                 evidence.sources.add("context")
                 evidence.evidence.add("最近澄清上下文")
 
+        if not collected:
+            hinted_domains = {
+                domain
+                for domain, hints in _DOMAIN_HINTS.items()
+                if any(hint in expression for hint in hints)
+            }
+            fallback_entities = (
+                entity
+                for entity in eligible.values()
+                if not hinted_domains or entity.domain in hinted_domains
+            )
+            for entity in fallback_entities:
+                self._add(
+                    collected,
+                    (entity,),
+                    "semantic_fallback",
+                    None,
+                    f"动作兼容后备候选:{entity.entity_id}",
+                    semantic_score=self._semantic_similarity(
+                        expression,
+                        entity,
+                    ),
+                )
+
         ordered = sorted(
             collected.items(),
             key=lambda item: (
@@ -201,8 +235,9 @@ class CandidateBuilder:
         collected: dict[tuple[str, ...], _CandidateEvidence],
         entities: tuple[HaEntitySnapshot, ...],
         source: str,
-        matched_term: str,
+        matched_term: str | None,
         evidence: str,
+        semantic_score: float = 0,
     ) -> None:
         ordered_entities = tuple(sorted(entities, key=lambda item: item.entity_id))
         key = tuple(entity.entity_id for entity in ordered_entities)
@@ -211,11 +246,40 @@ class CandidateBuilder:
             _CandidateEvidence(entities=ordered_entities),
         )
         item.sources.add(source)
-        item.matched_terms.add(matched_term)
+        if matched_term is not None:
+            item.matched_terms.add(matched_term)
         item.evidence.add(evidence)
+        item.semantic_score = max(item.semantic_score, semantic_score)
 
     @staticmethod
+    def _semantic_similarity(
+        expression: str,
+        entity: HaEntitySnapshot,
+    ) -> float:
+        names = (
+            entity.friendly_name,
+            entity.original_name,
+            entity.device_name,
+            *entity.aliases,
+            *entity.device_aliases,
+        )
+        return max(
+            (
+                SequenceMatcher(
+                    None,
+                    expression,
+                    normalize_term(name),
+                ).ratio()
+                * 100
+                for name in names
+                if name and normalize_term(name)
+            ),
+            default=0,
+        )
+
+    @classmethod
     def _to_candidate(
+        cls,
         evidence: _CandidateEvidence,
         *,
         candidate_id: str,
@@ -223,10 +287,7 @@ class CandidateBuilder:
         home_id: str,
     ) -> TargetCandidate:
         entities = evidence.entities
-        names = [
-            entity.friendly_name or entity.original_name or entity.entity_id
-            for entity in entities
-        ]
+        names = [cls._entity_display_name(entity) for entity in entities]
         display_name = names[0]
         if len(names) > 1:
             display_name = f"{names[0]} 等 {len(names)} 个设备"
@@ -257,4 +318,19 @@ class CandidateBuilder:
             evidence=tuple(sorted(evidence.evidence)),
             catalog_version=catalog.catalog_version,
             home_id=home_id,
+        )
+
+    @staticmethod
+    def _entity_display_name(entity: HaEntitySnapshot) -> str:
+        if (
+            entity.device_name
+            and entity.original_name
+            and normalize_term(entity.original_name) in {"灯", "light"}
+        ):
+            return entity.device_name
+        return (
+            entity.friendly_name
+            or entity.device_name
+            or entity.original_name
+            or entity.entity_id
         )

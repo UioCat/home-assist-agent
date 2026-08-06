@@ -21,6 +21,8 @@ def entity(
     *,
     friendly_name: str,
     aliases: tuple[str, ...] = (),
+    original_name: str | None = None,
+    device_name: str | None = None,
     area_name: str | None = "卧室",
     capabilities: frozenset[str] = frozenset({"turn_on", "turn_off"}),
     available: bool = True,
@@ -32,7 +34,9 @@ def entity(
         entity_id=entity_id,
         domain=entity_id.split(".", maxsplit=1)[0],
         friendly_name=friendly_name,
+        original_name=original_name,
         aliases=aliases,
+        device_name=device_name,
         area_name=area_name,
         state="off" if available else "unavailable",
         capabilities=capabilities,
@@ -232,6 +236,119 @@ def test_area_match_produces_one_stable_entity_set() -> None:
     assert candidates[0].sources == ("area",)
 
 
+def test_missing_exact_light_name_builds_semantic_fallback_candidates() -> None:
+    candidates = CandidateBuilder().build(
+        intent=intent("床头灯"),
+        actor=ACTOR,
+        catalog=catalog_with(
+            entity("light.inner", friendly_name="靠内灯", aliases=()),
+            entity("light.outer", friendly_name="靠外灯", aliases=()),
+        ),
+        terms=[],
+    )
+
+    assert [candidate.target_entity_ids for candidate in candidates] == [
+        ("light.inner",),
+        ("light.outer",),
+    ]
+    assert [candidate.sources for candidate in candidates] == [
+        ("semantic_fallback",),
+        ("semantic_fallback",),
+    ]
+    assert [candidate.matched_terms for candidate in candidates] == [(), ()]
+
+
+def test_light_fallback_excludes_other_domains_and_unavailable_entities() -> None:
+    candidates = CandidateBuilder().build(
+        intent=intent("床头灯"),
+        actor=ACTOR,
+        catalog=catalog_with(
+            entity("light.inner", friendly_name="靠内灯", aliases=()),
+            entity(
+                "light.unavailable",
+                friendly_name="靠外灯",
+                aliases=(),
+                available=False,
+            ),
+            entity(
+                "switch.outlet",
+                friendly_name="床边插座",
+                aliases=(),
+            ),
+        ),
+        terms=[],
+    )
+
+    assert [candidate.target_entity_ids for candidate in candidates] == [
+        ("light.inner",),
+    ]
+
+
+def test_semantic_fallback_uses_text_similarity_before_candidate_limit() -> None:
+    candidates = CandidateBuilder(limit=2).build(
+        intent=intent("床头灯"),
+        actor=ACTOR,
+        catalog=catalog_with(
+            entity(
+                "light.a_indicator",
+                friendly_name="电脑 指示灯",
+                aliases=(),
+            ),
+            entity(
+                "light.y_outer",
+                friendly_name="靠外灯",
+                aliases=(),
+            ),
+            entity(
+                "light.z_inner",
+                friendly_name="靠内灯",
+                aliases=(),
+            ),
+        ),
+        terms=[],
+    )
+
+    assert {
+        candidate.target_entity_ids for candidate in candidates
+    } == {
+        ("light.y_outer",),
+        ("light.z_inner",),
+    }
+
+
+def test_candidate_display_name_removes_only_generic_integration_suffix() -> None:
+    candidates = CandidateBuilder().build(
+        intent=intent("床头灯"),
+        actor=ACTOR,
+        catalog=catalog_with(
+            entity(
+                "light.inner",
+                friendly_name="靠内灯  灯",
+                original_name="灯",
+                device_name="靠内灯",
+                aliases=(),
+            ),
+            entity(
+                "light.indicator",
+                friendly_name="电脑  指示灯",
+                original_name="指示灯",
+                device_name="电脑",
+                aliases=(),
+            ),
+        ),
+        terms=[],
+    )
+
+    display_by_entity = {
+        candidate.target_entity_ids[0]: candidate.display_name
+        for candidate in candidates
+    }
+    assert display_by_entity == {
+        "light.inner": "靠内灯",
+        "light.indicator": "电脑  指示灯",
+    }
+
+
 def test_candidate_and_entity_set_limits_are_enforced() -> None:
     many_entities = tuple(
         entity(
@@ -257,10 +374,14 @@ def test_candidate_and_entity_set_limits_are_enforced() -> None:
         catalog=catalog_with(*many_entities),
         terms=[],
     )
-    assert area_candidates == []
+    assert len(area_candidates) == 20
+    assert all(
+        len(candidate.target_entity_ids) == 1
+        for candidate in area_candidates
+    )
 
 
-def test_invisible_personal_terms_do_not_create_candidates() -> None:
+def test_invisible_personal_terms_do_not_create_term_backed_candidates() -> None:
     candidates = CandidateBuilder().build(
         intent=intent("我的灯"),
         actor=ACTOR,
@@ -277,7 +398,10 @@ def test_invisible_personal_terms_do_not_create_candidates() -> None:
         ],
     )
 
-    assert candidates == []
+    assert [candidate.target_entity_ids for candidate in candidates] == [
+        ("light.mine",),
+    ]
+    assert candidates[0].sources == ("semantic_fallback",)
 
 
 def test_catalog_contract_rejects_cross_home_entities() -> None:

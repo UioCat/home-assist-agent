@@ -151,7 +151,7 @@ const devices: Device[] = [
     display_name: "书房台灯",
     area: "书房",
     risk_level: "low",
-    status: "missing",
+    status: "offline",
     created_at: "2026-07-23T09:05:00Z",
     updated_at: staleTimestamp,
   },
@@ -342,18 +342,21 @@ export function createDemoDeviceStates(): Record<string, DeviceState> {
       values: { LockState: "LOCK", BatteryLevel: 78 },
       observed_at: DEMO_TIMESTAMP,
       freshness: "fresh",
+      availability: "online",
     },
     "device-climate": {
       device_ref: "climate.living_room",
       values: { PowerSwitch: true, CurrentTemperature: 24.3, TargetTemperature: 23 },
       observed_at: "2026-07-29T08:24:49Z",
       freshness: "fresh",
+      availability: "online",
     },
     "device-lamp": {
       device_ref: "lan:desk-lamp",
       values: {},
       observed_at: staleTimestamp,
       freshness: "stale",
+      availability: "offline",
     },
   };
 }

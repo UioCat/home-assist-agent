@@ -100,6 +100,50 @@ async def test_target_resolution_prompt_exposes_only_opaque_candidate_identity()
     assert "model_reasoning_effort=medium" in call["args"]
 
 
+@pytest.mark.asyncio
+async def test_semantic_fallback_prompt_requires_reasoning_over_device_facts() -> None:
+    runner = CapturingRunner(
+        output=json.dumps(
+            {
+                "status": "no_match",
+                "selected_candidate_id": None,
+                "confidence": 0,
+                "alternative_candidate_ids": [],
+                "reason": "没有合理目标",
+            },
+            ensure_ascii=False,
+        )
+    )
+    gateway = CodexGateway(
+        runner=runner,
+        audit=InMemoryAuditRecorder(),
+    )
+    fallback = candidate(
+        "cand_01",
+        "light.inner",
+    ).model_copy(
+        update={
+            "display_name": "靠内灯",
+            "areas": (),
+            "sources": ("semantic_fallback",),
+            "matched_terms": (),
+            "rule_score": 50,
+        }
+    )
+
+    await gateway.resolve_target(
+        utterance="打开床头灯",
+        action_intent=INTENT,
+        candidates=[fallback],
+        message_id="message-semantic-fallback",
+    )
+
+    prompt = runner.calls[0]["stdin"]
+    assert "semantic_fallback" in prompt
+    assert "不能仅因缺少精确字符串匹配就返回 no_match" in prompt
+    assert "名称、区域、设备类型" in prompt
+
+
 def test_target_resolution_schema_has_no_entity_id_output() -> None:
     schema_path = (
         Path(__file__).parents[1]
@@ -115,6 +159,9 @@ def test_target_resolution_schema_has_no_entity_id_output() -> None:
     assert set(schema["required"]) == set(schema["properties"])
     assert "entity_id" not in schema["properties"]
     assert "target_entity_ids" not in schema["properties"]
+    assert "uniqueItems" not in schema["properties"][
+        "alternative_candidate_ids"
+    ]
 
 
 def test_every_iot_route_carries_a_target_expression() -> None:
@@ -166,6 +213,13 @@ def test_every_iot_route_carries_a_target_expression() -> None:
             "confidence": 0.5,
             "alternative_candidate_ids": ["cand_01"],
             "reason": "只有一个歧义项",
+        },
+        {
+            "status": "ambiguous",
+            "selected_candidate_id": None,
+            "confidence": 0.5,
+            "alternative_candidate_ids": ["cand_01", "cand_01"],
+            "reason": "重复歧义项",
         },
         {
             "status": "no_match",

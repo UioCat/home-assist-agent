@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from datetime import datetime
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -23,6 +24,7 @@ class DeviceState(BaseModel):
     values: dict[str, Any] = Field(default_factory=dict)
     observed_at: datetime = Field(default_factory=utc_now)
     freshness: str = "fresh"
+    availability: Literal["online", "offline", "unknown"] = "online"
 
 
 class ProviderDevice(BaseModel):
@@ -55,10 +57,12 @@ class ProviderResult(BaseModel):
 
 
 class ProviderEvent(BaseModel):
+    message_id: str = Field(default_factory=lambda: str(uuid4()))
     device_ref: str
     identifier: str
     values: dict[str, Any] = Field(default_factory=dict)
     occurred_at: datetime = Field(default_factory=utc_now)
+    availability: Literal["online", "offline", "unknown"] = "online"
 
 
 class Subscription(Protocol):
@@ -74,18 +78,35 @@ class DeviceProvider(Protocol):
     provider_id: str
     provider_type: str
 
-    async def health(self) -> ProviderHealth: ...
+    async def health(self, *, message_id: str | None = None) -> ProviderHealth: ...
 
-    async def discover(self) -> ProviderInventory: ...
+    async def discover(self, *, message_id: str | None = None) -> ProviderInventory: ...
 
     async def read_state(
-        self, device_ref: str, selectors: list[str] | None = None
+        self,
+        device_ref: str,
+        selectors: list[str] | None = None,
+        *,
+        message_id: str | None = None,
     ) -> DeviceState: ...
 
-    async def write_properties(self, device_ref: str, values: dict[str, Any]) -> ProviderResult: ...
-
-    async def invoke_service(
-        self, device_ref: str, service: str, inputs: dict[str, Any]
+    async def write_properties(
+        self,
+        device_ref: str,
+        values: dict[str, Any],
+        *,
+        message_id: str | None = None,
     ) -> ProviderResult: ...
 
-    async def subscribe(self, sink: EventSink) -> Subscription: ...
+    async def invoke_service(
+        self,
+        device_ref: str,
+        service: str,
+        inputs: dict[str, Any],
+        *,
+        message_id: str | None = None,
+    ) -> ProviderResult: ...
+
+    async def subscribe(
+        self, sink: EventSink, *, message_id: str | None = None
+    ) -> Subscription: ...

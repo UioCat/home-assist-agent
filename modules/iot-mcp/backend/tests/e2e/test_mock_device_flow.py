@@ -18,16 +18,29 @@ class RecordingMockProvider(MockDeviceProvider):
         self.service_calls: list[tuple[str, str, dict[str, Any]]] = []
 
     async def write_properties(
-        self, device_ref: str, values: dict[str, Any]
+        self,
+        device_ref: str,
+        values: dict[str, Any],
+        *,
+        message_id: str | None = None,
     ):
         self.writes.append((device_ref, dict(values)))
-        return await super().write_properties(device_ref, values)
+        return await super().write_properties(
+            device_ref, values, message_id=message_id
+        )
 
     async def invoke_service(
-        self, device_ref: str, service: str, inputs: dict[str, Any]
+        self,
+        device_ref: str,
+        service: str,
+        inputs: dict[str, Any],
+        *,
+        message_id: str | None = None,
     ):
         self.service_calls.append((device_ref, service, dict(inputs)))
-        return await super().invoke_service(device_ref, service, inputs)
+        return await super().invoke_service(
+            device_ref, service, inputs, message_id=message_id
+        )
 
 
 def _build_like_web_dist(tmp_path: Path) -> Path:
@@ -66,6 +79,7 @@ async def test_built_console_and_http_surfaces_control_real_mock_state(
     provider = RecordingMockProvider()
     runtime = build_runtime(
         Settings(
+            auth_enabled=True,
             database_url=f"sqlite+aiosqlite:///{tmp_path / 'mock-flow.db'}",
             admin_token="example-admin-token",
             machine_tokens={"example-machine-token": "e2e-agent"},

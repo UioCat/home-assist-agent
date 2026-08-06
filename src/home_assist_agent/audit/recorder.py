@@ -33,6 +33,7 @@ class AuditRecorderProtocol(Protocol):
         event_type: str,
         service: str,
         payload: Any,
+        conversation_id: str | None = None,
         status: str = "success",
         error_code: str | None = None,
         correlation_id: str | None = None,
@@ -47,6 +48,11 @@ class AuditQueryProtocol(Protocol):
     ) -> list[AuditMessageSummary]: ...
 
     async def list_events(self, message_id: str) -> list[AuditEvent]: ...
+
+    async def list_conversation_events(
+        self,
+        conversation_id: str,
+    ) -> list[AuditEvent]: ...
 
 
 def redact_sensitive(value: Any, key: str | None = None) -> Any:
@@ -83,6 +89,7 @@ class SQLiteAuditRecorder:
         event_type: str,
         service: str,
         payload: Any,
+        conversation_id: str | None = None,
         status: str = "success",
         error_code: str | None = None,
         correlation_id: str | None = None,
@@ -95,6 +102,7 @@ class SQLiteAuditRecorder:
                 event_type=event_type,
                 service=service,
                 payload=redact_sensitive(payload),
+                conversation_id=conversation_id,
                 status=status,
                 error_code=error_code,
                 correlation_id=correlation_id,
@@ -111,6 +119,21 @@ class SQLiteAuditRecorder:
     async def list_events(self, message_id: str) -> list[AuditEvent]:
         try:
             return await asyncio.to_thread(self._list_events_sync, message_id)
+        except (OSError, sqlite3.Error, TypeError, ValueError) as error:
+            raise DependencyError(
+                "audit_unavailable",
+                "审计记录读取失败。",
+            ) from error
+
+    async def list_conversation_events(
+        self,
+        conversation_id: str,
+    ) -> list[AuditEvent]:
+        try:
+            return await asyncio.to_thread(
+                self._list_conversation_events_sync,
+                conversation_id,
+            )
         except (OSError, sqlite3.Error, TypeError, ValueError) as error:
             raise DependencyError(
                 "audit_unavailable",
@@ -145,6 +168,7 @@ class SQLiteAuditRecorder:
             CREATE TABLE IF NOT EXISTS audit_events (
                 event_id TEXT PRIMARY KEY,
                 message_id TEXT NOT NULL,
+                conversation_id TEXT,
                 sequence INTEGER NOT NULL,
                 event_type TEXT NOT NULL,
                 service TEXT NOT NULL,
@@ -183,6 +207,16 @@ class SQLiteAuditRecorder:
             )
         if "causation_id" not in columns:
             connection.execute("ALTER TABLE audit_events ADD COLUMN causation_id TEXT")
+        if "conversation_id" not in columns:
+            connection.execute(
+                "ALTER TABLE audit_events ADD COLUMN conversation_id TEXT"
+            )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_audit_events_conversation
+                ON audit_events(conversation_id, created_at, event_id)
+            """
+        )
 
     def _record_sync(
         self,
@@ -191,6 +225,7 @@ class SQLiteAuditRecorder:
         event_type: str,
         service: str,
         payload: Any,
+        conversation_id: str | None,
         status: str,
         error_code: str | None,
         correlation_id: str | None,
@@ -219,6 +254,7 @@ class SQLiteAuditRecorder:
                 INSERT INTO audit_events (
                     event_id,
                     message_id,
+                    conversation_id,
                     sequence,
                     event_type,
                     service,
@@ -228,11 +264,12 @@ class SQLiteAuditRecorder:
                     correlation_id,
                     causation_id,
                     created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event_id,
                     message_id,
+                    conversation_id,
                     sequence,
                     event_type,
                     service,
@@ -247,6 +284,7 @@ class SQLiteAuditRecorder:
         return AuditEvent(
             event_id=event_id,
             message_id=message_id,
+            conversation_id=conversation_id,
             sequence=sequence,
             event_type=event_type,
             service=service,
@@ -265,6 +303,7 @@ class SQLiteAuditRecorder:
                 SELECT
                     event_id,
                     message_id,
+                    conversation_id,
                     sequence,
                     event_type,
                     service,
@@ -284,15 +323,60 @@ class SQLiteAuditRecorder:
             AuditEvent(
                 event_id=row[0],
                 message_id=row[1],
-                sequence=row[2],
-                event_type=row[3],
-                service=row[4],
-                payload=json.loads(row[5]),
-                status=row[6],
-                error_code=row[7],
-                correlation_id=row[8],
-                causation_id=row[9],
-                created_at=datetime.fromisoformat(row[10]),
+                conversation_id=row[2],
+                sequence=row[3],
+                event_type=row[4],
+                service=row[5],
+                payload=json.loads(row[6]),
+                status=row[7],
+                error_code=row[8],
+                correlation_id=row[9],
+                causation_id=row[10],
+                created_at=datetime.fromisoformat(row[11]),
+            )
+            for row in rows
+        ]
+
+    def _list_conversation_events_sync(
+        self,
+        conversation_id: str,
+    ) -> list[AuditEvent]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    event_id,
+                    message_id,
+                    conversation_id,
+                    sequence,
+                    event_type,
+                    service,
+                    payload_json,
+                    status,
+                    error_code,
+                    correlation_id,
+                    causation_id,
+                    created_at
+                FROM audit_events
+                WHERE conversation_id = ?
+                ORDER BY created_at, event_id
+                """,
+                (conversation_id,),
+            ).fetchall()
+        return [
+            AuditEvent(
+                event_id=row[0],
+                message_id=row[1],
+                conversation_id=row[2],
+                sequence=row[3],
+                event_type=row[4],
+                service=row[5],
+                payload=json.loads(row[6]),
+                status=row[7],
+                error_code=row[8],
+                correlation_id=row[9],
+                causation_id=row[10],
+                created_at=datetime.fromisoformat(row[11]),
             )
             for row in rows
         ]
@@ -317,7 +401,8 @@ class SQLiteAuditRecorder:
                             ELSE 0
                         END
                     ) AS status_rank,
-                    MAX(correlation_id) AS correlation_id
+                    MAX(correlation_id) AS correlation_id,
+                    MAX(conversation_id) AS conversation_id
                 FROM audit_events
                 GROUP BY message_id
                 ORDER BY ended_at DESC
@@ -385,6 +470,7 @@ class SQLiteAuditRecorder:
                 response=responses.get(row[0]),
                 input_type=input_types.get(row[0], "message"),
                 correlation_id=row[5],
+                conversation_id=row[6],
             )
             for row in rows
         ]
@@ -402,6 +488,7 @@ class InMemoryAuditRecorder:
         event_type: str,
         service: str,
         payload: Any,
+        conversation_id: str | None = None,
         status: str = "success",
         error_code: str | None = None,
         correlation_id: str | None = None,
@@ -411,6 +498,7 @@ class InMemoryAuditRecorder:
             event = AuditEvent(
                 event_id=uuid4().hex,
                 message_id=message_id,
+                conversation_id=conversation_id,
                 sequence=(
                     sum(existing.message_id == message_id for existing in self.events)
                     + 1
@@ -429,6 +517,16 @@ class InMemoryAuditRecorder:
 
     async def list_events(self, message_id: str) -> list[AuditEvent]:
         return [event for event in self.events if event.message_id == message_id]
+
+    async def list_conversation_events(
+        self,
+        conversation_id: str,
+    ) -> list[AuditEvent]:
+        return [
+            event
+            for event in self.events
+            if event.conversation_id == conversation_id
+        ]
 
     async def list_messages(
         self,
@@ -494,6 +592,14 @@ class InMemoryAuditRecorder:
                             event.correlation_id
                             for event in reversed(events)
                             if event.correlation_id is not None
+                        ),
+                        None,
+                    ),
+                    conversation_id=next(
+                        (
+                            event.conversation_id
+                            for event in reversed(events)
+                            if event.conversation_id is not None
                         ),
                         None,
                     ),

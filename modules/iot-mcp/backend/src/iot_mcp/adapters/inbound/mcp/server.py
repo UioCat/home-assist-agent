@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from iot_mcp.application.policy import ControlAction, SafeControlError, TrustedPrincipal
 from iot_mcp.application.safe_dto import operation_public_dto, redact_sensitive
+from iot_mcp.audit import AuditUnavailableError
 from iot_mcp.bootstrap.container import ApplicationContainer
 from iot_mcp.domain.enums import OperationStatus
 from iot_mcp.domain.models import utc_now
@@ -34,65 +35,92 @@ def create_mcp_server(
 
     @server.tool(name="list_thing_models")
     async def list_thing_models() -> dict[str, Any]:
-        async def operation() -> dict[str, Any]:
-            return _result(data=[_json(item) for item in await container.queries.list_models()])
+        async def operation(message_id: str) -> dict[str, Any]:
+            return _result(
+                message_id=message_id,
+                data=[_json(item) for item in await container.queries.list_models()],
+            )
 
-        return await _safe_call(operation)
+        return await _safe_call(container, "list_thing_models", {}, operation)
 
     @server.tool(name="get_thing_model")
     async def get_thing_model(model_id: Any) -> dict[str, Any]:
-        async def operation() -> dict[str, Any]:
+        arguments = {"model_id": model_id}
+
+        async def operation(message_id: str) -> dict[str, Any]:
             item = await container.models.get_model_version(_required_string(model_id, "model_id"))
             if item is None:
                 raise SafeControlError(
                     "thing_model_not_found", "thing model was not found", status_code=404
                 )
-            return _result(data=_json(item))
+            return _result(message_id=message_id, data=_json(item))
 
-        return await _safe_call(operation)
+        return await _safe_call(container, "get_thing_model", arguments, operation)
 
     @server.tool(name="list_devices")
     async def list_devices() -> dict[str, Any]:
-        async def operation() -> dict[str, Any]:
-            return _result(data=[_json(item) for item in await container.queries.list_devices()])
+        async def operation(message_id: str) -> dict[str, Any]:
+            return _result(
+                message_id=message_id,
+                data=[_json(item) for item in await container.queries.list_devices()],
+            )
 
-        return await _safe_call(operation)
+        return await _safe_call(container, "list_devices", {}, operation)
 
     @server.tool(name="get_device")
     async def get_device(device_id: Any) -> dict[str, Any]:
-        async def operation() -> dict[str, Any]:
+        arguments = {"device_id": device_id}
+
+        async def operation(message_id: str) -> dict[str, Any]:
             normalized = _required_string(device_id, "device_id")
             device = await container.queries.get_device(normalized)
             bindings = await container.devices.list_bindings(normalized)
-            return _result(data={"device": _json(device), "bindings": _json(bindings)})
+            return _result(
+                message_id=message_id,
+                data={"device": _json(device), "bindings": _json(bindings)},
+            )
 
-        return await _safe_call(operation)
+        return await _safe_call(container, "get_device", arguments, operation)
 
     @server.tool(name="get_device_state")
     async def get_device_state(device_id: Any) -> dict[str, Any]:
-        async def operation() -> dict[str, Any]:
-            state = await container.queries.read_state(_required_string(device_id, "device_id"))
-            return _result(data=_json(state), observed_at=state.observed_at)
+        arguments = {"device_id": device_id}
 
-        return await _safe_call(operation)
+        async def operation(message_id: str) -> dict[str, Any]:
+            state = await container.queries.read_state(
+                _required_string(device_id, "device_id"), message_id=message_id
+            )
+            return _result(
+                message_id=message_id,
+                data=_json(state),
+                observed_at=state.observed_at,
+            )
+
+        return await _safe_call(container, "get_device_state", arguments, operation)
 
     @server.tool(name="set_device_properties")
     async def set_device_properties(
         device_id: Any, values: Any, idempotency_key: Any
     ) -> dict[str, Any]:
-        async def operation() -> dict[str, Any]:
+        arguments = {
+            "device_id": device_id,
+            "values": values,
+            "idempotency_key": idempotency_key,
+        }
+
+        async def operation(message_id: str) -> dict[str, Any]:
             normalized_values = _required_object(values, "values")
-            request_id = str(uuid4())
             normalized_key = _required_string(idempotency_key, "idempotency_key")
             control_operation = await container.control.submit(
                 device_id=_required_string(device_id, "device_id"),
                 action=ControlAction.properties(normalized_values),
                 principal=TrustedPrincipal.mcp("mcp"),
                 idempotency_key=f"mcp:{normalized_key}",
+                message_id=message_id,
             )
-            return _operation_result(control_operation, request_id=request_id)
+            return _operation_result(control_operation, message_id=message_id)
 
-        return await _safe_call(operation)
+        return await _safe_call(container, "set_device_properties", arguments, operation)
 
     @server.tool(name="invoke_device_service")
     async def invoke_device_service(
@@ -101,8 +129,14 @@ def create_mcp_server(
         idempotency_key: Any,
         inputs: Any = None,
     ) -> dict[str, Any]:
-        async def operation() -> dict[str, Any]:
-            request_id = str(uuid4())
+        arguments = {
+            "device_id": device_id,
+            "identifier": identifier,
+            "idempotency_key": idempotency_key,
+            "inputs": inputs,
+        }
+
+        async def operation(message_id: str) -> dict[str, Any]:
             normalized_key = _required_string(idempotency_key, "idempotency_key")
             control_operation = await container.control.submit(
                 device_id=_required_string(device_id, "device_id"),
@@ -112,47 +146,80 @@ def create_mcp_server(
                 ),
                 principal=TrustedPrincipal.mcp("mcp"),
                 idempotency_key=f"mcp:{normalized_key}",
+                message_id=message_id,
             )
-            return _operation_result(control_operation, request_id=request_id)
+            return _operation_result(control_operation, message_id=message_id)
 
-        return await _safe_call(operation)
+        return await _safe_call(container, "invoke_device_service", arguments, operation)
 
     @server.tool(name="get_operation")
     async def get_operation(operation_id: Any) -> dict[str, Any]:
-        async def operation() -> dict[str, Any]:
+        arguments = {"operation_id": operation_id}
+
+        async def operation(message_id: str) -> dict[str, Any]:
             item = await container.queries.get_operation(
                 _required_string(operation_id, "operation_id")
             )
-            return _operation_result(item)
+            return _operation_result(item, message_id=message_id)
 
-        return await _safe_call(operation)
+        return await _safe_call(container, "get_operation", arguments, operation)
 
     @server.tool(name="query_device_events")
     async def query_device_events(device_id: Any, limit: Any = 100) -> dict[str, Any]:
-        async def operation() -> dict[str, Any]:
+        arguments = {"device_id": device_id, "limit": limit}
+
+        async def operation(message_id: str) -> dict[str, Any]:
             normalized_limit = _required_limit(limit)
             normalized_device_id = _required_string(device_id, "device_id")
             await container.queries.get_device(normalized_device_id)
             events = await container.states.list_events(
                 normalized_device_id, limit=normalized_limit
             )
-            return _result(data=[_json(item) for item in events])
+            return _result(
+                message_id=message_id,
+                data=[_json(item) for item in events],
+            )
 
-        return await _safe_call(operation)
+        return await _safe_call(container, "query_device_events", arguments, operation)
 
     return server
 
 
-async def _safe_call(callback: Any) -> dict[str, Any]:
+async def _safe_call(
+    container: ApplicationContainer,
+    tool: str,
+    arguments: dict[str, Any],
+    callback: Any,
+) -> dict[str, Any]:
+    message_id = str(uuid4())
     try:
-        return await callback()
-    except SafeControlError as error:
+        await container.audit.record(
+            message_id=message_id,
+            event_type="mcp.request",
+            service="mcp_api",
+            payload={"tool": tool, "arguments": arguments},
+        )
+    except AuditUnavailableError:
         return _result(
+            message_id=message_id,
+            status="failed",
+            error={
+                "code": "audit_unavailable",
+                "message": "audit persistence is unavailable",
+                "retryable": True,
+            },
+        )
+    try:
+        result = await callback(message_id)
+    except SafeControlError as error:
+        result = _result(
+            message_id=message_id,
             status="failed",
             error={"code": error.code, "message": error.message, "retryable": error.retryable},
         )
     except (TypeError, ValueError, ValidationError):
-        return _result(
+        result = _result(
+            message_id=message_id,
             status="failed",
             error={
                 "code": "invalid_request",
@@ -161,7 +228,8 @@ async def _safe_call(callback: Any) -> dict[str, Any]:
             },
         )
     except Exception:
-        return _result(
+        result = _result(
+            message_id=message_id,
             status="failed",
             error={
                 "code": "internal_error",
@@ -169,6 +237,26 @@ async def _safe_call(callback: Any) -> dict[str, Any]:
                 "retryable": True,
             },
         )
+    try:
+        await container.audit.record(
+            message_id=message_id,
+            event_type="mcp.response",
+            service="mcp_api",
+            payload={"tool": tool, "result": result},
+            status="error" if result["status"] == "failed" else "success",
+            error_code=(result.get("error") or {}).get("code"),
+        )
+    except AuditUnavailableError:
+        return _result(
+            message_id=message_id,
+            status="failed",
+            error={
+                "code": "audit_unavailable",
+                "message": "audit persistence is unavailable",
+                "retryable": True,
+            },
+        )
+    return result
 
 
 def _required_string(value: Any, name: str) -> str:
@@ -193,7 +281,7 @@ def _required_limit(value: Any) -> int:
     return value
 
 
-def _operation_result(operation: Any, *, request_id: str | None = None) -> dict[str, Any]:
+def _operation_result(operation: Any, *, message_id: str) -> dict[str, Any]:
     confirmation_required = operation.status is OperationStatus.PENDING_CONFIRMATION
     data: dict[str, Any] = {"operation": operation_public_dto(operation)}
     if confirmation_required:
@@ -202,7 +290,7 @@ def _operation_result(operation: Any, *, request_id: str | None = None) -> dict[
         if confirmation_id:
             data["confirmation_id"] = confirmation_id
     return _result(
-        request_id=request_id,
+        message_id=message_id,
         operation_id=operation.operation_id,
         status=operation.status.value,
         data=data,
@@ -213,15 +301,17 @@ def _operation_result(operation: Any, *, request_id: str | None = None) -> dict[
 def _result(
     *,
     data: Any = None,
-    request_id: str | None = None,
+    message_id: str | None = None,
     operation_id: str | None = None,
     status: str = "succeeded",
     error: dict[str, Any] | None = None,
     observed_at: datetime | None = None,
     confirmation_required: bool = False,
 ) -> dict[str, Any]:
+    resolved_message_id = message_id or str(uuid4())
     result = {
-        "request_id": request_id or str(uuid4()),
+        "message_id": resolved_message_id,
+        "request_id": resolved_message_id,
         "operation_id": operation_id,
         "status": status,
         "data": _json(data if data is not None else {}),

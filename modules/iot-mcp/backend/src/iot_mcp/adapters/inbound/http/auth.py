@@ -67,6 +67,8 @@ class SessionCodec:
 
 
 def verify_admin_token(request: Request, settings: Settings) -> None:
+    if not settings.auth_enabled:
+        return
     token = _bearer_token(request)
     if not settings.admin_token or not hmac.compare_digest(token, settings.admin_token):
         raise SafeControlError("unauthorized", "authentication failed", status_code=401)
@@ -75,6 +77,8 @@ def verify_admin_token(request: Request, settings: Settings) -> None:
 def authenticate_request(
     request: Request, settings: Settings, *, require_csrf: bool = False
 ) -> TrustedPrincipal:
+    if not settings.auth_enabled:
+        return TrustedPrincipal.web_session("owner")
     authorization = request.headers.get("authorization")
     if authorization is not None:
         token = _bearer_token(request)

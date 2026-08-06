@@ -1,6 +1,7 @@
 import type {
   ConfirmationItem,
   Device,
+  DeviceCard,
   DeviceDetail,
   DeviceEvent,
   DeviceState,
@@ -75,7 +76,7 @@ export class HttpApiClient implements IoTApi {
   }
 
   async createSession(adminToken: string): Promise<void> {
-    const response = await this.request<{ csrf_token: string }>("/auth/session", {
+    const response = await this.request<SessionInfo>("/auth/session", {
       method: "POST",
       adminToken,
     });
@@ -128,6 +129,10 @@ export class HttpApiClient implements IoTApi {
 
   listDevices() {
     return this.request<Device[]>("/devices");
+  }
+
+  listDeviceCards() {
+    return this.request<DeviceCard[]>("/device-cards");
   }
 
   getDevice(deviceId: string) {

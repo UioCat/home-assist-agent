@@ -7,6 +7,8 @@ from home_assist_agent.audit.recorder import SQLiteAuditRecorder
 from home_assist_agent.channels.message import MessageChannel
 from home_assist_agent.codex.gateway import CodexGateway, SubprocessRunner
 from home_assist_agent.commands.service import CommandOrchestrator
+from home_assist_agent.conversations.coordinator import ConversationCoordinator
+from home_assist_agent.conversations.store import SQLiteConversationStore
 from home_assist_agent.context.store import SQLiteHouseholdContextStore
 from home_assist_agent.devices.executor import DeviceExecutor
 from home_assist_agent.events.service import EventService
@@ -113,6 +115,13 @@ def build_app(settings: AppSettings | None = None) -> FastAPI:
         orchestrator=command_orchestrator,
         audit=audit,
         actor=actor,
+        conversations=ConversationCoordinator(
+            store=SQLiteConversationStore(
+                active_settings.conversation_db_path
+            ),
+            session=codex,
+            audit=audit,
+        ),
     )
     event_service = EventService(
         receipts=SQLiteEventReceiptStore(active_settings.event_db_path),
@@ -137,6 +146,7 @@ def build_app(settings: AppSettings | None = None) -> FastAPI:
         event_service=event_service,
         frontend_dist=active_settings.frontend_dist,
         promotion_worker=promotion_worker,
+        cors_origins=active_settings.cors_origins,
     )
     app.state.target_resolution_enabled = (
         active_settings.target_resolution_enabled

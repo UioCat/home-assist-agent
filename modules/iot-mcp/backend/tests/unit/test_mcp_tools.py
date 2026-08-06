@@ -12,7 +12,10 @@ from iot_mcp.config.settings import Settings
 @pytest.fixture
 async def runtime(tmp_path):
     application = build_runtime(
-        Settings(database_url=f"sqlite+aiosqlite:///{tmp_path / 'mcp.db'}"),
+        Settings(
+            database_url=f"sqlite+aiosqlite:///{tmp_path / 'mcp.db'}",
+            audit_database_path=str(tmp_path / "audit.db"),
+        ),
         providers={"mock": MockDeviceProvider()},
     )
     await application.startup()
@@ -133,4 +136,26 @@ async def test_mcp_returns_stable_safe_input_errors(runtime) -> None:
         "message": "values must be an object",
         "retryable": False,
     }
-    assert set(result) == {"request_id", "operation_id", "status", "data", "error", "observed_at"}
+    assert set(result) == {
+        "message_id",
+        "request_id",
+        "operation_id",
+        "status",
+        "data",
+        "error",
+        "observed_at",
+    }
+
+
+async def test_mcp_request_and_structured_response_share_one_audit_chain(runtime) -> None:
+    result = await _call(runtime, "list_devices", {})
+
+    assert result["message_id"] == result["request_id"]
+    events = [
+        event
+        for event in await runtime.container.audit.list_events(result["message_id"])
+        if event.service == "mcp_api"
+    ]
+    assert [event.event_type for event in events] == ["mcp.request", "mcp.response"]
+    assert events[0].payload == {"tool": "list_devices", "arguments": {}}
+    assert events[1].payload["result"] == result

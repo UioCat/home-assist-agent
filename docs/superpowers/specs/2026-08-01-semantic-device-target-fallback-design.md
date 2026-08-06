@@ -2,7 +2,7 @@
 
 日期：2026-08-01
 
-状态：已批准，待实施
+状态：已实现
 
 ## 1. 背景与问题
 
@@ -115,7 +115,7 @@ semantic_fallback
 
 所有新增路径沿用同一 `message_id`，兼容 `request_id` 与其相同。新增或扩展审计内容：
 
-- `target.candidates_generated` 记录精确或后备生成模式、候选及裁剪原因；
+- `target.candidates_generated` 记录精确或后备生成模式及完整候选；
 - Codex 请求完整记录后备候选和 prompt，响应记录结构化选择、stdout、stderr 和失败；
 - 定向澄清的最终用户响应由现有 `user.response` 完整记录；
 - “全部”确认记录被合并的候选编号和实体集合；

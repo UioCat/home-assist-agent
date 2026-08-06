@@ -1,6 +1,7 @@
 import type {
   ConfirmationItem,
   ConsoleOperation,
+  DeviceCard,
   IoTApi,
   OperationResult,
   SyncResult,
@@ -33,7 +34,7 @@ export class DemoApiClient implements IoTApi {
   }
 
   async bootstrapSession() {
-    return { csrf_token: "demo-csrf", expires_at: "2099-01-01T00:00:00Z" };
+    return { auth_enabled: false, csrf_token: null, expires_at: null };
   }
 
   async createSession(): Promise<void> {}
@@ -132,6 +133,97 @@ export class DemoApiClient implements IoTApi {
 
   async listDevices() {
     return structuredClone(this.catalog.devices);
+  }
+
+  async listDeviceCards(): Promise<DeviceCard[]> {
+    return structuredClone(
+      this.catalog.devices.map((device) => {
+        const state = this.states[device.device_id];
+        const detail = buildDemoDeviceDetail(
+          device,
+          this.states,
+          this.catalog.models,
+        );
+        const properties = detail.bound_model?.tsl_json.properties ?? [];
+        const services = detail.bound_model?.tsl_json.services ?? [];
+        const primaryProperty = ["PowerSwitch", "LockState"]
+          .map((identifier) =>
+            properties.find(
+              (property) =>
+                property.identifier === identifier
+                && property.accessMode === "rw"
+                && identifier in state.values,
+            ),
+          )
+          .find(Boolean);
+        const provider = this.catalog.providers.find(
+          (item) => item.provider_id === device.provider_id,
+        );
+        const secondaryStatus = [
+          "Brightness",
+          "CurrentTemperature",
+          "TargetTemperature",
+          "BatteryLevel",
+        ].flatMap((identifier) => {
+          const property = properties.find(
+            (candidate) => candidate.identifier === identifier,
+          );
+          if (!property || !(identifier in state.values)) return [];
+          const unit = Array.isArray(property.dataType.specs)
+            ? null
+            : typeof property.dataType.specs.unit === "string"
+              ? property.dataType.specs.unit
+              : null;
+          return [{
+            identifier,
+            name: property.name,
+            value: state.values[identifier],
+            unit,
+          }];
+        }).slice(0, 2);
+        return {
+          device_id: device.device_id,
+          display_name: device.display_name,
+          area: device.area,
+          device_type: (
+            device.device_id === "device-lock"
+              ? "lock"
+              : device.device_id === "device-climate"
+                ? "climate"
+                : "light"
+          ) as DeviceCard["device_type"],
+          device_type_label: device.device_id === "device-lock"
+            ? "门锁"
+            : device.device_id === "device-climate"
+              ? "温控"
+              : "灯具",
+          availability: state.availability,
+          provider_id: device.provider_id,
+          provider_type: provider?.provider_type ?? device.provider_id,
+          device_status: device.status,
+          provider_status: provider?.status ?? "unknown",
+          risk_level: device.risk_level,
+          observed_at: state.observed_at,
+          freshness: state.freshness,
+          values: state.values,
+          primary_control: primaryProperty && state.availability === "online"
+            ? {
+                kind: "property" as const,
+                identifier: primaryProperty.identifier,
+                name: primaryProperty.name,
+                data_type: primaryProperty.dataType,
+                current_value: state.values[primaryProperty.identifier],
+                risk_level:
+                  detail.feature_bindings.find(
+                    (binding) => binding.identifier === primaryProperty.identifier,
+                  )?.risk_level ?? device.risk_level,
+              }
+            : null,
+          secondary_status: secondaryStatus,
+          capability_count: properties.length + services.length,
+        };
+      }),
+    );
   }
 
   async getDevice(deviceId: string) {

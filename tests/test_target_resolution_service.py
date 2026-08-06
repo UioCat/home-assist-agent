@@ -517,7 +517,54 @@ async def test_ambiguity_or_low_confidence_returns_choices_without_side_effects(
 
 
 @pytest.mark.asyncio
-async def test_no_candidates_skips_codex_and_mcp() -> None:
+async def test_ambiguous_fallback_names_real_devices_in_clarification() -> None:
+    first = entity(
+        "light.inner",
+        friendly_name="靠内灯",
+        aliases=(),
+    )
+    second = entity(
+        "light.outer",
+        friendly_name="靠外灯",
+        aliases=(),
+    )
+    catalog = SequencedCatalog(snapshot(first, second))
+    service, mcp, audit, _, _ = build_service(
+        decision=RouteDecision(
+            category="direct_iot",
+            device_command=DeviceCommand(
+                action="turn_on",
+                target_expression="床头灯",
+            ),
+        ),
+        catalog=catalog,
+        codex=FakeCodex([ambiguous()]),
+    )
+
+    response = await service.execute(
+        "打开床头灯",
+        "message-fallback-ambiguous",
+        actor=ACTOR,
+    )
+
+    assert response.status == "needs_input"
+    assert "床头灯" in response.message
+    assert "靠内灯" in response.message
+    assert "靠外灯" in response.message
+    assert mcp.calls == []
+    candidate_events = [
+        event
+        for event in audit.events
+        if event.event_type == "target.candidates_generated"
+    ]
+    assert len(candidate_events) == 1
+    assert candidate_events[0].payload["generation_mode"] == (
+        "semantic_fallback"
+    )
+
+
+@pytest.mark.asyncio
+async def test_semantic_no_match_skips_mcp() -> None:
     catalog = SequencedCatalog(
         snapshot(
             entity(
@@ -527,7 +574,17 @@ async def test_no_candidates_skips_codex_and_mcp() -> None:
             )
         )
     )
-    codex = FakeCodex([selected()])
+    codex = FakeCodex(
+        [
+            TargetResolutionDecision(
+                status="no_match",
+                selected_candidate_id=None,
+                confidence=0,
+                alternative_candidate_ids=(),
+                reason="候选灯与用户称呼无合理语义关系",
+            )
+        ]
+    )
     service, mcp, _, terms, _ = build_service(
         decision=RouteDecision(
             category="direct_iot",
@@ -548,7 +605,7 @@ async def test_no_candidates_skips_codex_and_mcp() -> None:
 
     assert response.status == "needs_input"
     assert response.resolution.status == "no_match"
-    assert codex.resolve_calls == []
+    assert codex.resolve_calls == [["cand_01"]]
     assert mcp.calls == []
     assert len(terms.attempts) == 1
 
@@ -706,3 +763,114 @@ async def test_clarification_followup_uses_new_message_and_original_causation() 
     assert second_response.status == "success"
     assert mcp.calls[-1][2] == "message-followup"
     assert router.calls == ["打开床头灯"]
+
+
+@pytest.mark.asyncio
+async def test_clarification_all_executes_only_displayed_candidates_and_learns_set() -> None:
+    first = entity(
+        "light.inner",
+        friendly_name="靠内灯",
+        aliases=(),
+    )
+    second = entity(
+        "light.outer",
+        friendly_name="靠外灯",
+        aliases=(),
+    )
+    catalog = SequencedCatalog(
+        snapshot(first, second),
+        snapshot(first, second),
+    )
+    learning = RecordingTermLearning()
+    service, mcp, audit, _, router = build_service(
+        decision=RouteDecision(
+            category="direct_iot",
+            device_command=DeviceCommand(
+                action="turn_on",
+                target_expression="床头灯",
+            ),
+        ),
+        catalog=catalog,
+        codex=FakeCodex([ambiguous()]),
+        term_learning=learning,
+    )
+
+    first_response = await service.execute(
+        "打开床头灯",
+        "message-all-original",
+        actor=ACTOR,
+    )
+    second_response = await service.execute(
+        "全部",
+        "message-all-followup",
+        actor=ACTOR,
+    )
+
+    assert first_response.status == "needs_input"
+    assert "全部" in first_response.message
+    assert second_response.status == "success"
+    assert [call[1]["name"] for call in mcp.calls] == [
+        "light.inner",
+        "light.outer",
+    ]
+    assert all(call[2] == "message-all-followup" for call in mcp.calls)
+    assert router.calls == ["打开床头灯"]
+    assert len(learning.record_calls) == 1
+    assert learning.record_calls[0]["expression"] == "床头灯"
+    assert learning.record_calls[0]["target"].entity_ids == (
+        "light.inner",
+        "light.outer",
+    )
+    selection_events = [
+        event
+        for event in audit.events
+        if event.event_type == "target.clarification_all_selected"
+    ]
+    assert len(selection_events) == 1
+    assert selection_events[0].message_id == "message-all-followup"
+    assert selection_events[0].payload["entity_ids"] == [
+        "light.inner",
+        "light.outer",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_opposite_action_all_followup_does_not_execute_original_action() -> None:
+    first = entity(
+        "light.inner",
+        friendly_name="靠内灯",
+        aliases=(),
+    )
+    second = entity(
+        "light.outer",
+        friendly_name="靠外灯",
+        aliases=(),
+    )
+    catalog = SequencedCatalog(snapshot(first, second))
+    service, mcp, _, _, router = build_service(
+        decision=RouteDecision(
+            category="direct_iot",
+            device_command=DeviceCommand(
+                action="turn_on",
+                target_expression="床头灯",
+            ),
+        ),
+        catalog=catalog,
+        codex=FakeCodex([ambiguous()]),
+    )
+
+    first_response = await service.execute(
+        "打开床头灯",
+        "message-opposite-original",
+        actor=ACTOR,
+    )
+    second_response = await service.execute(
+        "全部关闭",
+        "message-opposite-followup",
+        actor=ACTOR,
+    )
+
+    assert first_response.status == "needs_input"
+    assert second_response.status != "success"
+    assert mcp.calls == []
+    assert router.calls == ["打开床头灯", "全部关闭"]

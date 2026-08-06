@@ -422,6 +422,17 @@ class CommandOrchestrator:
                         "round": resolution_round + 1,
                         "target_expression": intent.target_expression,
                         "action": intent.action,
+                        "generation_mode": (
+                            "semantic_fallback"
+                            if candidates
+                            and all(
+                                "semantic_fallback" in candidate.sources
+                                for candidate in candidates
+                            )
+                            else "exact"
+                            if candidates
+                            else "none"
+                        ),
                         "catalog_version": catalog.catalog_version,
                         "candidates": [
                             candidate.model_dump(mode="json")
@@ -751,9 +762,7 @@ class CommandOrchestrator:
                 summary="需要用户确认目标",
             )
         )
-        prompt = "没有找到可控制的目标，请换一种称呼。"
-        if choices:
-            prompt = "请确认要控制哪个设备。"
+        prompt = self._clarification_prompt(intent, choices)
         return self._response(
             message_id=message_id,
             category=route_decision.category,
@@ -769,6 +778,26 @@ class CommandOrchestrator:
                 attempt_id=attempt.attempt_id,
             ),
         )
+
+    @staticmethod
+    def _clarification_prompt(
+        intent: DeviceActionIntent,
+        choices: tuple[ClarificationChoice, ...],
+    ) -> str:
+        if not choices:
+            return "没有找到可控制的目标，请换一种称呼。"
+        quoted_names = [f"“{choice.display_name}”" for choice in choices]
+        if len(quoted_names) == 1:
+            candidates = quoted_names[0]
+        else:
+            candidates = "、".join(quoted_names[:-1]) + f"或{quoted_names[-1]}"
+        prompt = (
+            f"“{intent.target_expression}”可能是{candidates}。"
+            "请确认要控制哪一个。"
+        )
+        if len(choices) > 1:
+            prompt += "如果都要控制，也可以说“全部”。"
+        return prompt
 
     async def _match_clarification(
         self,
@@ -795,9 +824,18 @@ class CommandOrchestrator:
             if normalized in accepted:
                 choice_index = index
                 break
-        if choice_index is None:
+        verification_candidates = list(attempt.candidates)
+        selected_all = self._all_clarification_candidate(
+            attempt,
+            normalized,
+        )
+        if selected_all is not None:
+            candidate_id = selected_all.candidate_id
+            verification_candidates.append(selected_all)
+        elif choice_index is not None:
+            candidate_id = attempt.choice_candidate_ids[choice_index]
+        else:
             return None
-        candidate_id = attempt.choice_candidate_ids[choice_index]
         resolution = TargetResolutionDecision(
             status=ResolutionStatus.SELECTED,
             selected_candidate_id=candidate_id,
@@ -811,9 +849,24 @@ class CommandOrchestrator:
             parameters=attempt.parameters,
         )
         try:
+            if selected_all is not None:
+                await self._active_audit.record(
+                    message_id=message_id,
+                    event_type="target.clarification_all_selected",
+                    service="target_resolution",
+                    payload={
+                        "source_message_id": attempt.source_message_id,
+                        "candidate_ids": attempt.choice_candidate_ids,
+                        "entity_ids": list(selected_all.target_entity_ids),
+                        "action": attempt.action,
+                        "target_expression": attempt.target_expression,
+                    },
+                    correlation_id=attempt.source_message_id,
+                    causation_id=attempt.source_message_id,
+                )
             verified = await self._active_verifier.verify(
                 decision=resolution,
-                candidates=list(attempt.candidates),
+                candidates=verification_candidates,
                 actor=actor,
                 intent=intent,
                 message_id=message_id,
@@ -867,6 +920,117 @@ class CommandOrchestrator:
             started_at=started_at,
             correlation_id=attempt.source_message_id,
             causation_id=attempt.source_message_id,
+        )
+
+    @staticmethod
+    def _all_clarification_candidate(
+        attempt: ResolutionAttempt,
+        normalized_command: str,
+    ) -> TargetCandidate | None:
+        generic_expressions = {
+            "全部",
+            "全都",
+            "都要",
+        }
+        action_expressions = {
+            "turn_on": {
+                "都打开",
+                "都开启",
+                "全部打开",
+                "两盏都开",
+                "两盏都打开",
+                "两个都打开",
+            },
+            "turn_off": {
+                "都关闭",
+                "都关掉",
+                "全部关闭",
+                "全部关掉",
+                "两盏都关",
+                "两盏都关闭",
+                "两个都关闭",
+            },
+            "set_brightness": {
+                "都调",
+                "全部都调",
+            },
+        }
+        accepted_expressions = generic_expressions | action_expressions.get(
+            attempt.action,
+            set(),
+        )
+        if (
+            normalized_command not in accepted_expressions
+            or len(attempt.choice_candidate_ids) < 2
+        ):
+            return None
+        candidate_by_id = {
+            candidate.candidate_id: candidate
+            for candidate in attempt.candidates
+        }
+        selected = [
+            candidate_by_id[candidate_id]
+            for candidate_id in attempt.choice_candidate_ids
+            if candidate_id in candidate_by_id
+        ]
+        if len(selected) != len(attempt.choice_candidate_ids):
+            return None
+        entity_ids = tuple(
+            sorted(
+                {
+                    entity_id
+                    for candidate in selected
+                    for entity_id in candidate.target_entity_ids
+                }
+            )
+        )
+        catalog_versions = {
+            candidate.catalog_version for candidate in selected
+        }
+        home_ids = {candidate.home_id for candidate in selected}
+        if (
+            not entity_ids
+            or len(entity_ids) > 20
+            or len(catalog_versions) != 1
+            or len(home_ids) != 1
+        ):
+            return None
+        return TargetCandidate(
+            candidate_id="cand_99",
+            target_entity_ids=entity_ids,
+            display_name="以上全部设备",
+            areas=tuple(
+                sorted(
+                    {
+                        area
+                        for candidate in selected
+                        for area in candidate.areas
+                    }
+                )
+            ),
+            domains=tuple(
+                sorted(
+                    {
+                        domain
+                        for candidate in selected
+                        for domain in candidate.domains
+                    }
+                )
+            ),
+            states=tuple(
+                state
+                for candidate in selected
+                for state in candidate.states
+            ),
+            sources=("clarification_all",),
+            matched_terms=(attempt.target_expression,),
+            rule_score=0,
+            evidence=tuple(
+                f"用户确认全部:{candidate.candidate_id}"
+                for candidate in selected
+            ),
+            catalog_version=catalog_versions.pop(),
+            home_id=home_ids.pop(),
         )
 
     @staticmethod

@@ -26,7 +26,7 @@ const cases: StateCase[] = [
     name: "overview loading",
     ui: <OverviewPage />,
     configure(api) {
-      vi.spyOn(api, "listDevices").mockReturnValue(never);
+      vi.spyOn(api, "listDeviceCards").mockReturnValue(never);
     },
     role: "status",
     expected: "正在汇总家庭设备信号",

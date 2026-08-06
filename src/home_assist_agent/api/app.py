@@ -1,12 +1,19 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator, Protocol
+from typing import AsyncIterator, Protocol, Sequence
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 
-from home_assist_agent.api.models import CommandRequest, HealthResponse
+from home_assist_agent.api.models import (
+    CommandRequest,
+    ConversationCreateRequest,
+    ConversationCreated,
+    ConversationView,
+    HealthResponse,
+)
 from home_assist_agent.audit.models import AuditEvent, AuditMessageSummary
 from home_assist_agent.audit.recorder import AuditQueryProtocol
 from home_assist_agent.commands.models import CommandResponse
@@ -19,7 +26,15 @@ class CommandServiceProtocol(Protocol):
         command: str,
         reasoning: str,
         message_id: str | None = None,
+        conversation_id: str | None = None,
     ) -> CommandResponse: ...
+
+    async def current_conversation(self) -> ConversationView: ...
+
+    async def create_conversation(
+        self,
+        message_id: str | None = None,
+    ) -> ConversationCreated: ...
 
 
 class HealthServiceProtocol(Protocol):
@@ -43,6 +58,7 @@ def create_app(
     event_service: EventServiceProtocol | None = None,
     frontend_dist: Path | None = None,
     promotion_worker: PromotionWorkerProtocol | None = None,
+    cors_origins: Sequence[str] = (),
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -60,6 +76,14 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.term_promotion_worker = promotion_worker
+    if cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(cors_origins),
+            allow_credentials=False,
+            allow_methods=["GET", "POST"],
+            allow_headers=["Accept", "Content-Type"],
+        )
 
     @app.post("/api/commands", response_model=CommandResponse)
     async def execute_command(request: CommandRequest) -> CommandResponse:
@@ -67,7 +91,24 @@ def create_app(
             request.command,
             request.reasoning,
             request.message_id,
+            request.conversation_id,
         )
+
+    @app.get(
+        "/api/conversations/current",
+        response_model=ConversationView,
+    )
+    async def current_conversation() -> ConversationView:
+        return await command_service.current_conversation()
+
+    @app.post(
+        "/api/conversations",
+        response_model=ConversationCreated,
+    )
+    async def create_conversation(
+        request: ConversationCreateRequest,
+    ) -> ConversationCreated:
+        return await command_service.create_conversation(request.message_id)
 
     @app.get("/api/health", response_model=HealthResponse)
     async def health() -> HealthResponse:

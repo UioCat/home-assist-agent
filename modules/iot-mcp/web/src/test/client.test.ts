@@ -28,7 +28,11 @@ describe("HttpApiClient authentication", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
-        new Response(JSON.stringify({ csrf_token: "csrf-1" }), {
+        new Response(JSON.stringify({
+          auth_enabled: true,
+          csrf_token: "csrf-1",
+          expires_at: "2026-07-29T10:00:00Z",
+        }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         }),
@@ -93,7 +97,11 @@ describe("HttpApiClient authentication", () => {
       .fn()
       .mockResolvedValueOnce(
         new Response(
-          JSON.stringify({ csrf_token: "restored-csrf", expires_at: "2026-07-29T10:00:00Z" }),
+          JSON.stringify({
+            auth_enabled: true,
+            csrf_token: "restored-csrf",
+            expires_at: "2026-07-29T10:00:00Z",
+          }),
           { status: 200, headers: { "Content-Type": "application/json" } },
         ),
       )
@@ -120,7 +128,11 @@ describe("HttpApiClient authentication", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
-        new Response(JSON.stringify({ csrf_token: "csrf", expires_at: "future" }), {
+        new Response(JSON.stringify({
+          auth_enabled: true,
+          csrf_token: "csrf",
+          expires_at: "future",
+        }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         }),
@@ -157,7 +169,11 @@ describe("HttpApiClient authentication", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
-        json({ csrf_token: "csrf-post", expires_at: "2026-07-29T10:00:00Z" }),
+        json({
+          auth_enabled: true,
+          csrf_token: "csrf-post",
+          expires_at: "2026-07-29T10:00:00Z",
+        }),
       )
       .mockResolvedValueOnce(
         json({ operation_id: "op-decision", device_id: "door", status: "succeeded" }),
@@ -224,7 +240,7 @@ describe("HttpApiClient authentication", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
-        json({ csrf_token: "csrf-model", expires_at: "future" }),
+        json({ auth_enabled: true, csrf_token: "csrf-model", expires_at: "future" }),
       )
       .mockResolvedValueOnce(
         json({

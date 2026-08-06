@@ -10,8 +10,14 @@ build/
 frontend/node_modules/
 frontend/dist/
 .playwright-cli/
-output/playwright/
+output/
+.superpowers/
+MEMORY.md
+RECENT_CONTEXT.md
+SESSION-STATE.md
+memory/
 *.log
 data/*.db
 data/*.db-shm
 data/*.db-wal
+/iot_mcp_ha.db*
